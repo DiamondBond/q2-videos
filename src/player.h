@@ -197,8 +197,9 @@ typedef struct {      /* an opened video */
 enum { ENG_OPENING, ENG_READY, ENG_FAILED };
 /* To the keyframe before the place; ahead, to that one when it is at least half the way on from
  * where the video is, else to the one after, so a step ahead always moves on; to the very place,
- * what is before it decoded and dropped. */
-enum { SEEK_BACK, SEEK_AHEAD, SEEK_EXACT };
+ * what is before it decoded and dropped; ahead but never past the place: as ahead, with the very
+ * place where that would take the keyframe after. */
+enum { SEEK_BACK, SEEK_AHEAD, SEEK_EXACT, SEEK_UPTO };
 typedef struct {
     int state;        /* ENG_ */
     int fresh;        /* a new picture is in *cur: draw it */
@@ -282,11 +283,14 @@ typedef struct { /* what is drawn over the picture */
     const pop_t *pop;
     const char *title;
     long long pos_ms, dur_ms;
-    int controls, knob, paused;
+    int controls, knob;
+    int paused; /* the pause's mark between the times */
+    int disc;   /* and its disc in the middle, for the moment after pausing */
+    int target; /* the place being chosen with the wheel, said in the middle */
     int nchapters;
     const long long *chapter; /* their starts, ms */
     int volume;               /* the volume band: the level, -1 not shown */
-    int badge;                /* a side button's seek so far, seconds: "+30 s"; 0 none */
+    int badge;                /* a side button's seek so far, seconds: "+30 s", "+1:40"; 0 none */
     const char *notice;       /* a line to say, 0 none */
     const char *subs;         /* the subtitles on show, lines parted by \n; 0 none */
     int subsize;              /* Small, Medium or Large */
@@ -305,6 +309,8 @@ int osd_any(const osd_t *o);
 void osd_draw(pix *page, const osd_t *o);
 /* "12:34", "1:02:03", and what is left, a time below zero: "-21:10". */
 const char *time_text(long long ms, char *out, size_t n);
+/* What a run of skips has moved: "+10 s", "-50 s", and from a minute up "+1:40", "-2:10". */
+const char *skip_text(int secs, char *out, size_t n);
 
 enum { HIT_NONE, HIT_MENU, HIT_BAR, HIT_MIDDLE };
 int hit(int x, int y);                     /* what a tap at (x, y) is on, the controls shown */

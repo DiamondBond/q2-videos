@@ -591,6 +591,7 @@ static void *reader_main(void *unused) {
     AVPacket *pkt = av_packet_alloc();
     int si = -1, aswitch = 0, serial = 0, want_key, keyless = 0, cut = 0;
     long long ahead = NONE, ahead_to = 0; /* a seek ahead's: the place to get past, and its own */
+    int upto = 0;                         /* and it goes no further than its own */
     long long off = 0, vnext = NONE, anext = NONE, place = NONE; /* joined()'s */
     long long read_ms = 0; /* how far into the video the packets read reach */
     int ok = pkt && media_open();
@@ -621,8 +622,10 @@ static void *reader_main(void *unused) {
             lock();
             /* ahead, that keyframe must be at least half the way on from where it was (seen when
              * it is read): +10 s then lands 5 to 10 s on, or at the first keyframe after */
-            ahead = how == SEEK_AHEAD && E.vi >= 0 && !E.still && bytes < 0 ? (E.seek.from + us) / 2
-                                                                            : NONE;
+            upto = how == SEEK_UPTO;
+            ahead = (how == SEEK_AHEAD || upto) && E.vi >= 0 && !E.still && bytes < 0
+                        ? (E.seek.from + us) / 2
+                        : NONE;
             ahead_to = us;
             E.rserial = serial, E.skip_us = skip, E.skip_serial = serial;
             want_key = E.vi >= 0 && !E.still, keyless = 0;
@@ -713,11 +716,12 @@ static void *reader_main(void *unused) {
                 av_rescale_q(at, E.ic->streams[E.vi]->time_base, AV_TIME_BASE_Q) <= ahead) {
                 /* A seek ahead came out under half the way on, keyframes being far apart: the
                  * keyframe after the place, then, so that +10 s always moves on; and where there
-                 * is none after, this one again with all before the place decoded and dropped. */
+                 * is none after, or the place is as far as it may go, this one again with all
+                 * before the place decoded and dropped. */
                 ahead = NONE, keyless = 0;
                 av_packet_unref(pkt);
                 unlock();
-                int exact = av_seek_frame(E.ic, -1, ahead_to, 0) < 0;
+                int exact = upto || av_seek_frame(E.ic, -1, ahead_to, 0) < 0;
                 if (exact) av_seek_frame(E.ic, -1, ahead_to, AVSEEK_FLAG_BACKWARD);
                 lock();
                 if (exact) E.skip_us = ahead_to, E.skip_serial = serial;

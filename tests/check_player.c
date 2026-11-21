@@ -531,6 +531,10 @@ static void check_controls(void) {
     SAME(time_text(3723000, t, sizeof t), "1:02:03");
     SAME(time_text(-1270000, t, sizeof t), "-21:10");
     SAME(time_text(-3600000, t, sizeof t), "-1:00:00"), SAME(time_text(-999, t, sizeof t), "-0:00");
+    /* a run of skips: seconds, and from a minute up as a time */
+    SAME(skip_text(10, t, sizeof t), "+10 s"), SAME(skip_text(-50, t, sizeof t), "-50 s");
+    SAME(skip_text(60, t, sizeof t), "+1:00"), SAME(skip_text(100, t, sizeof t), "+1:40");
+    SAME(skip_text(-130, t, sizeof t), "-2:10");
     SAME(time_text(360000000, t, sizeof t), "100:00:00");
 
     /* a tap: the dots at the top right, the bar's band, the middle; the bar's ends are its ends */
@@ -898,10 +902,12 @@ static void run_plain(void) {
 static void run_resume(void) {
     videos("long.mp4");
     marked("long.mp4", 61000, 120022, 0, -1, -1);
-    play("resume", "long.mp4", "0 shot first\n1000 shot one\n4000 key 170\n", 0);
+    play("resume", "long.mp4", "0 shot first\n1000 shot one\n3500 shot on\n4000 key 170\n", 0);
     /* from the keyframe before the place, one every two seconds: its picture at once */
     NEAR(num("first", "pos"), 60000, 40), CHECK(num("first", "pic") == 60000);
     NEAR(num("one", "pos"), 61000, 40), NEAR(num("one", "pic"), 60980, 40);
+    /* and the controls for three seconds: the title, and where in it this is */
+    CHECK(num("one", "controls") && !num("on", "controls"));
     mark_t k = mark_of("long.mp4");
     NEAR(k.pos_ms, 64000, 40);
     CHECK(!k.flags && k.dur_ms == 120022 && k.seq == 8 && mark_unfinished(&k));
@@ -910,7 +916,7 @@ static void run_resume(void) {
     marked("long.mp4", 61000, 120022, MARK_WATCHED, -1, -1);
     play("rewatch", "long.mp4", "1000 shot one\n2000 key 170\n", 0);
     CHECK(num("one", "pos") == 1000 && mark_of("long.mp4").flags == MARK_WATCHED &&
-          mark_of("long.mp4").pos_ms == 0);
+          mark_of("long.mp4").pos_ms == 0 && !num("one", "controls"));
 
     /* TERM, as Q2 Pod's held Return sends it: the place is on the card when the process ends */
     marked("long.mp4", 61000, 120022, 0, -1, -1);
@@ -1009,16 +1015,30 @@ static void run_release(void) {
 static void run_pause(void) {
     videos("h264-aac.mp4");
     play("pause", "h264-aac.mp4",
-         "1900 shot before\n2000 key 171\n2500 shot p1\n4000 shot p2\n4500 key 171\n"
-         "5500 shot on\n6000 key 170\n",
+         "1900 shot before\n2000 key 171\n2500 shot p1\n3500 shot p2\n3600 tap 60 150\n"
+         "3700 shot p3\n4100 tap 60 150\n4200 shot p4\n4500 key 171\n5500 shot on\n"
+         "6000 key 170\n",
          0);
     CHECK(num("p1", "paused") && num("p1", "controls") && !num("before", "paused"));
     NEAR(num("p1", "pos"), 2000, 30), NEAR(num("p1", "pic"), 2000, 45);
     /* nothing moves: the same place, the same frame, no more sound */
-    CHECK(num("p2", "pos") == num("p1", "pos") && num("p2", "frames") == num("p1", "frames") &&
-          !moved("p1", "p2"));
-    CHECK(rgb("p1", 180, 160) == WHITE && rgb("p1", 195, 160) == WHITE &&
-          rgb("p1", 187, 160) != WHITE); /* the two bars */
+    CHECK(num("p2", "pos") == num("p1", "pos") && num("p2", "frames") == num("p1", "frames"));
+    /* the two bars on their disc, in the middle for a moment: 28 px of them from y 146 */
+    CHECK(num("p1", "disc") && rgb("p1", 180, 160) == WHITE && rgb("p1", 195, 160) == WHITE &&
+          rgb("p1", 187, 160) != WHITE);
+    CHECK(count("p1", 180, 140, 180, 180, WHITE) == 28 && rgb("p1", 180, 146) == WHITE &&
+          rgb("p1", 180, 173) == WHITE);
+    /* then out of the picture's way: only the disc's pixels change, and a small mark between
+     * the times says it is paused */
+    CHECK(!num("p2", "disc") && rgb("p2", 180, 160) != WHITE && moved("p1", "p2") > 500 &&
+          moved("p1", "p2") < 3600);
+    CHECK(count("p2", 180, 290, 196, 315, WHITE) == 66 && rgb("p2", 183, 298) == WHITE &&
+          rgb("p2", 192, 308) == WHITE && rgb("p2", 187, 303) != WHITE &&
+          !count("before", 180, 290, 196, 315, WHITE));
+    /* paused, a tap on the picture puts the bands away, and another brings them back */
+    CHECK(num("p2", "controls") && !num("p3", "controls") && num("p3", "paused") &&
+          num("p4", "controls") && num("p4", "paused"));
+    CHECK(!count("p3", 180, 290, 196, 315, WHITE) && count("p4", 180, 290, 196, 315, WHITE) == 66);
     CHECK(!num("on", "paused") && rgb("on", 180, 160) != WHITE);
     NEAR(num("on", "pos"), num("p1", "pos") + 1000, 30), NEAR(num("on", "tone"), 880, 15);
     CHECK(says("end h264-aac.mp4 quit pos=3"));
@@ -1049,7 +1069,8 @@ static void run_seek(void) {
     NEAR(num("c", "pic"), num("c", "pos"), 45); /* and the picture is the place's */
     NEAR(num("d", "pos"), 14400, 60);
     CHECK(num("d", "badge") == -10); /* back from 24.5 s: the keyframe before 14.5 s */
-    NEAR(num("e", "pos"), 400, 60), CHECK(num("e", "badge") == -20); /* past the start: the start */
+    /* past the start: the start, and the four seconds that moved */
+    NEAR(num("e", "pos"), 400, 60), CHECK(num("e", "badge") == -14);
     CHECK(!num("f", "badge") && num("f", "serial") == 5);
     NEAR(num("f", "tone"), 880, 15); /* and the sound is the place's too */
     CHECK(moved("a", "b") > 500 && moved("b", "c") > 500);
@@ -1073,6 +1094,17 @@ static void run_seek(void) {
           num("after", "serial") == 9);
     NEAR(num("after", "pos"), 750, 60);
 
+    /* held towards the end, the steps stop five seconds short of it, where the wheel's do, and
+     * the video plays on; a press in its last ten seconds ends it */
+    marked("long.mp4", 80000, 120022, 0, -1, -1);
+    play("held-end", "long.mp4",
+         "1000 k d 223\n1900 shot going\n4000 shot h\n4500 k u 223\n4600 shot up\n4700 key 223\n"
+         "5200 shot never\n",
+         0);
+    CHECK(num("going", "badge") > 20 && num("h", "state") == ENG_READY && !num("h", "badge"));
+    NEAR(num("h", "pos"), 115022 + 1750, 100); /* at the limit since the hold's fifth step */
+    CHECK(shot("up") && says("end long.mp4 over pos=117") && !shot("never"));
+
     /* past the end the video is over, as if it had played out */
     marked("long.mp4", 112000, 120022, 0, -1, -1);
     play("past-end", "long.mp4", "500 shot a\n1000 key 223\n1500 shot never\n", 0);
@@ -1086,8 +1118,12 @@ static void run_seek(void) {
          "2100 w 28\n2200 shot m3\n2400 shot m4\n2500 key 218\n2600 shot m5\n2700 w -28\n"
          "2800 shot m6\n3000 key 218\n3100 w -2800\n3200 shot m7\n3600 shot m8\n7500 shot m9\n",
          0);
-    CHECK(num("m0", "seek") && num("m0", "controls") && !num("m0", "serial"));
+    CHECK(num("m0", "seek") && num("m0", "controls") && !num("m0", "serial") &&
+          !num("m0", "target"));
     NEAR(num("m1", "pos"), 6200, 45);
+    /* the place being chosen is said in the middle while the wheel turns, and a moment on */
+    CHECK(num("m1", "target") && num("m2", "target") && !num("m5", "target") &&
+          !num("m6", "target"));
     CHECK(!num("m1", "serial")); /* the place chosen, not yet gone to */
     NEAR(num("m2", "pos"), 6500, 60), CHECK(num("m2", "serial") == 1 && num("m2", "seek"));
     CHECK(num("m3", "pos") == 0 &&
@@ -1100,6 +1136,12 @@ static void run_seek(void) {
     CHECK(!num("m9", "seek") && says("end long.mp4 over"));
     /* the knob, on the bar where the place is; none out of seek mode */
     CHECK(count("m1", 28, 276, 48, 282, WHITE) > 10 && !count("m5", 0, 270, 374, 282, WHITE));
+    /* a double click is no way in and out again: its second Centre is not taken */
+    play("double", "long.mp4",
+         "1000 key 218\n1150 key 218\n1300 shot a\n1700 key 218\n"
+         "1800 shot b\n1900 key 170\n",
+         0);
+    CHECK(num("a", "seek") && !num("b", "seek"));
     /* Return leaves seek mode, going to the place chosen; the next ends the video */
     play("wheel-return", "long.mp4",
          "1000 key 218\n1100 w -56\n1150 key 170\n1500 shot a\n2000 key 170\n2500 shot never\n", 0);
@@ -1231,12 +1273,16 @@ static void run_tracks(void) {
          0);
     CHECK(says("naudio=2 nsubs=1") && !num("a", "audio"));
     NEAR(num("a", "tone"), 880, 15); /* English: 440 Hz */
-    CHECK(num("m1", "menu") == 1 && !num("m1", "sel") &&
-          !num("m1", "paused")); /* Options, on Audio; it plays on */
+    /* Options, on Audio; the video waits while they are open, and plays on when they close */
+    CHECK(num("m1", "menu") == 1 && !num("m1", "sel") && num("m1", "paused") &&
+          !num("m1", "controls") && !num("m1", "disc"));
     CHECK(num("m2", "menu") == 2 && !num("m2", "sel") && num("m3", "menu") == 1 &&
-          num("m3", "audio") == 1 && !num("m4", "menu"));
+          num("m3", "audio") == 1 && !num("m4", "menu") && !num("m4", "paused") &&
+          !num("m4", "controls"));
+    CHECK(num("m3", "pos") == num("m1", "pos") && num("m3", "frames") == num("m1", "frames"));
     NEAR(num("b", "tone"), 1760, 30);
-    NEAR(num("b", "pos"), 6500, 10); /* 日本語: 880 Hz, mono at 44.1 kHz; the place as it was */
+    /* 日本語: 880 Hz, mono at 44.1 kHz; the place as it was, less the 700 ms they were open */
+    NEAR(num("b", "pos"), 5800, 20);
     CHECK(num("b", "frames") > num("m4", "frames") + RATE);
     CHECK(mark_of("two-audio-subs.mkv").audio == 1);
     play("audio-again", "two-audio-subs.mkv", "1500 shot a\n2000 key 170\n", 0);
@@ -1246,14 +1292,15 @@ static void run_tracks(void) {
 
 /* Subtitles: the file's own of each kind, files beside the video, switched and remembered. */
 static void run_subs(void) {
+    settings_t set;
     videos("two-audio-subs.mkv,ass.mkv,movtext.mp4,webvtt.mkv,sidecar.mp4,sidecar.srt,sidecar-bom."
            "srt=sidecar.ja.srt");
     /* on by default: the first that can be shown; then Off in the options, and on again */
     play("srt", "two-audio-subs.mkv",
          "1500 shot a\n1600 k d 171\n2400 k u 171\n2450 w -28\n2500 key 218\n2550 shot list\n"
          "2600 w 28\n2650 key 218\n2700 key 170\n2800 shot off\n3000 k d 171\n3800 k u 171\n"
-         "3850 w -28\n3900 key 218\n3950 w -28\n4000 key 218\n4050 key 170\n7500 shot on\n"
-         "9500 shot over\n",
+         "3850 w -28\n3900 key 218\n3950 w -28\n4000 key 218\n4050 key 170\n8500 shot on\n"
+         "10300 shot over\n",
          0);
     CHECK(says("nsubs=1 nside=0 chapters=0 sub=0") && !num("a", "sub"));
     SAME(lines("a"), "Hello");
@@ -1273,10 +1320,15 @@ static void run_subs(void) {
     CHECK(mark_of("two-audio-subs.mkv").sub == 0);
     play("srt-stays-off", "two-audio-subs.mkv", "1500 shot a\n2000 key 170\n", 0);
     CHECK(num("a", "sub") == -1);
-    /* the Subtitles setting Off: none by default, and still there to choose */
-    put(".videos/settings", "subs=0\n");
-    play("ass-setting-off", "ass.mkv", "1500 shot a\n2000 key 170\n", 0);
-    CHECK(says("nsubs=1") && num("a", "sub") == -1);
+    /* and Off is the Subtitles setting from then on: another video has none by default. They
+     * are still there to choose, and a track chosen turns the setting on again */
+    settings_load(&set), CHECK(set.subs == 0);
+    play("ass-setting-off", "ass.mkv",
+         "1500 shot a\n1600 k d 171\n2400 k u 171\n2450 key 218\n2500 w -28\n2550 key 218\n"
+         "2600 key 170\n2700 shot b\n2800 key 170\n",
+         0);
+    CHECK(says("nsubs=1") && num("a", "sub") == -1 && num("b", "sub") == 0);
+    settings_load(&set), CHECK(set.subs == 1);
     put(".videos/settings", "");
 
     /* ASS: its tags gone, \N a line's end, \h a space; MP4's own; WebVTT */
@@ -1289,14 +1341,14 @@ static void run_subs(void) {
     SAME(lines("a"), "Hello"), SAME(lines("b"), "Привет"), SAME(lines("c"), "こんにちは|Two lines");
 
     /* files beside the video: its own name's first, a Latin-1 line read as such; then the other,
-     * chosen in the options (Audio's row is there and can't be chosen: one track) */
+     * chosen in the options (which have no Audio row: one track) */
     play("sidecar", "sidecar.mp4",
          "1500 shot a\n4500 shot b\n5000 k d 171\n5800 k u 171\n5850 shot menu\n5900 key 218\n"
-         "5950 shot list\n6000 w -28\n6050 key 218\n6100 key 170\n6200 shot c\n7500 shot d\n",
+         "5950 shot list\n6000 w -28\n6050 key 218\n6100 key 170\n6600 shot c\n7500 shot d\n",
          0);
     CHECK(says("nsubs=0 nside=2 chapters=0 sub=0"));
     SAME(lines("a"), "First line|Second line"), SAME(lines("b"), "Привет, мир");
-    CHECK(num("menu", "menu") == 1 && num("menu", "sel") == 1 && num("list", "menu") == 3 &&
+    CHECK(num("menu", "menu") == 1 && num("menu", "sel") == 0 && num("list", "menu") == 3 &&
           num("list", "sel") == 1);
     CHECK(num("c", "sub") == 1);
     SAME(lines("c"), ""), SAME(lines("d"), ""); /* the other file has nothing there */
@@ -1319,12 +1371,17 @@ static void run_subs(void) {
         snprintf(set, sizeof set, "subsize=%d\n", i);
         put(".videos/settings", set);
         play("size", "audio-only.mp4",
-             "1000 shot a\n1100 tap 60 100\n1200 shot b\n4500 shot c\n4600 key 170\n", 0);
+             "1000 shot a\n1100 tap 60 100\n1200 shot b\n1300 k d 171\n2100 k u 171\n"
+             "2200 shot m\n2300 key 170\n2400 shot back\n4800 shot c\n4900 key 170\n",
+             0);
         n[i] = ink("a", 0, 200, 374, 264);
         SAME(lines("a"), "One row");
         CHECK(n[i] > 100 && !ink("a", 0, 265, 374, 319) && num("b", "controls") == 1 &&
               ink("b", 0, 200, 374, 264) == n[i] &&
               ink("a", 0, 262 - 16 - 4 * i, 374, 262) == n[i]);
+        /* nothing shows through the options, and they are back when those close */
+        CHECK(num("m", "menu") == 1 && !ink("m", 0, 236, 374, 264) && !num("back", "menu") &&
+              ink("back", 0, 200, 374, 264) == n[i]);
         /* five lines are five lines at any size, the smallest: none of them is left out */
         SAME(lines("c"), "One|Two|Three|Four|Five");
         CHECK(ink("c", 0, 176, 374, 190) > 30 && ink("c", 0, 248, 374, 262) > 30 &&
@@ -1358,28 +1415,32 @@ static void run_menu(void) {
          "2400 w -56\n2450 key 218\n2950 shot c3\n3000 k d 171\n3800 k u 171\n3850 w -56\n"
          "3900 key 218\n4400 shot s1\n5000 k d 171\n5800 k u 171\n5850 key 218\n5900 shot f1\n"
          "5950 key 170\n6200 shot f2\n7000 k d 171\n7800 k u 171\n7850 key 171\n7900 shot o3\n"
-         "8000 k d 171\n8800 k u 171\n8900 shot shut\n9200 key 170\n",
+         "8000 k d 171\n8800 k u 171\n8850 w -28\n8900 key 218\n8950 shot list\n9000 k d 171\n"
+         "9800 k u 171\n9850 shot back\n10000 k d 171\n10800 k u 171\n10900 shot shut\n"
+         "11200 key 170\n",
          0);
-    /* the rows that apply: Audio (one track: not to be chosen), Fit to Screen, Chapters, Start Over
-     */
-    CHECK(num("o1", "menu") == 1 && num("o1", "sel") == 1 && !num("o1", "paused"));
+    /* the rows that apply: Fit to Screen, Chapters, Start Over (one sound track: no Audio row);
+     * the video waits while they are open */
+    CHECK(num("o1", "menu") == 1 && num("o1", "sel") == 0 && num("o1", "paused"));
     CHECK(num("c1", "menu") == 4 && !num("c1", "sel")); /* the chapter playing */
     CHECK(num("c2", "sel") == 2);                       /* a side button, then the wheel */
     CHECK(num("o2", "menu") == 1 &&
-          num("o2", "sel") == 2); /* Return: back on the row it came from */
+          num("o2", "sel") == 1); /* Return: back on the row it came from */
     CHECK(!num("c3", "menu"));    /* to the chapter's very start, not the keyframe before */
     NEAR(num("c3", "pos"), 20500, 30), NEAR(num("c3", "pic"), 20480, 40);
     NEAR(num("s1", "pos"), 500, 40), CHECK(!num("s1", "menu")); /* Start Over */
     /* Fit to Screen: the menu stays, the setting is kept, the picture fills the screen */
-    CHECK(num("f1", "menu") == 1 && num("f1", "fill") == 1 && num("f1", "sel") == 1);
+    CHECK(num("f1", "menu") == 1 && num("f1", "fill") == 1 && num("f1", "sel") == 0);
     SAME(geom("f2"), "0,0,375,320");
     CHECK(count("f2", 0, 0, 374, 53, 0) < 375 * 54 / 4 && colour("f2", 20, 200) == 'g' &&
-          colour("f2", 350, 200) == 'm'); /* its sides cut */
+          colour("f2", 340, 150) == 'm'); /* its sides cut */
     settings_load(&set);
     CHECK(set.fill == 1);
-    /* Play/Pause pressed in them does nothing; held, it closes them */
-    CHECK(num("o3", "menu") == 1 && !num("o3", "paused") && !num("shut", "menu") &&
-          !num("shut", "paused"));
+    /* Play/Pause pressed in them closes them, and the video plays on; held, it goes back a
+     * level from a list, as Return does, and closes them from Options */
+    CHECK(!num("o3", "menu") && !num("o3", "paused") && num("list", "menu") == 4 &&
+          num("back", "menu") == 1 && num("back", "sel") == 1 && num("back", "paused"));
+    CHECK(!num("shut", "menu") && !num("shut", "paused"));
     put(".videos/settings", "fill=1\n");
     play("fill", "h264-aac.mp4",
          "1000 shot a\n2000 key 171\n2500 shot p\n3000 k d 171\n3800 k u 171\n3850 key 218\n"
@@ -1393,28 +1454,29 @@ static void run_menu(void) {
 
     /* a finger: a row is chosen, the box's own edge does nothing, outside it closes */
     play("menu-touch", "h264-aac.mp4",
-         "1000 k d 171\n1800 k u 171\n1900 tap 187 191\n2000 shot list\n2100 tap 187 100\n"
+         "1000 k d 171\n1800 k u 171\n1900 tap 187 175\n2000 shot list\n2100 tap 187 100\n"
          "2200 shot same\n2300 tap 187 175\n2800 shot there\n3000 k d 171\n3800 k u 171\n"
-         "3900 tap 187 127\n4000 shot off\n4100 tap 10 10\n4200 shot shut\n4500 key 170\n",
+         "3900 tap 187 100\n4000 shot off\n4100 tap 10 10\n4200 shot shut\n4500 key 170\n",
          0);
     CHECK(num("list", "menu") == 4 && num("same", "menu") == 4 && !num("there", "menu"));
-    NEAR(num("there", "pos"), 10500, 40);                   /* The Middle */
-    CHECK(num("off", "menu") == 1 && !num("shut", "menu")); /* Audio's row can't be chosen */
+    NEAR(num("there", "pos"), 10500, 40); /* The Middle; and it plays on from there */
+    CHECK(num("off", "menu") == 1 && num("off", "paused") && !num("shut", "menu") &&
+          !num("shut", "paused"));
 
     /* the box in each of Q2 Pod's looks: its colours where the look puts them */
     const char *script = "1000 k d 171\n1800 k u 171\n1900 shot box\n2000 key 170\n2100 key 170\n";
     play("modern", "h264-aac.mp4", script, POP_MODERN_ENV);
-    CHECK(rgb("box", 60, 240) == 0x1c1c1c && rgb("box", 47, 160) == 0x3a3a3a &&
+    CHECK(rgb("box", 60, 225) == 0x1c1c1c && rgb("box", 47, 160) == 0x3a3a3a &&
           rgb("box", 200, 146) == 0x2f7bf6 && rgb("box", 46, 160) != 0x3a3a3a);
     play("minimal", "h264-aac.mp4", script, POP_MINIMAL_ENV);
-    CHECK(rgb("box", 60, 240) == 0 && rgb("box", 47, 160) == 0x4a4a4a &&
-          rgb("box", 74, 159) == WHITE);
+    CHECK(rgb("box", 60, 225) == 0 && rgb("box", 47, 160) == 0x4a4a4a &&
+          rgb("box", 74, 143) == WHITE);
     play("classic", "h264-aac.mp4", script, POP_CLASSIC_ENV);
-    CHECK(rgb("box", 60, 236) == WHITE && rgb("box", 46, 160) == 0x5a595a &&
-          rgb("box", 60, 81) == 0xf9f9f9 && rgb("box", 52, 149) == 0x009ade);
+    CHECK(rgb("box", 60, 220) == WHITE && rgb("box", 46, 160) == 0x5a595a &&
+          rgb("box", 60, 97) == 0xf9f9f9 && rgb("box", 52, 133) == 0x009ade);
     play("plain", "h264-aac.mp4", script,
          "Q2_POPUP=classic ffffff"); /* half a value: the modern box on grey */
-    CHECK(rgb("box", 60, 240) == 0x1c1c1c && rgb("box", 200, 146) == 0x5a5a5a);
+    CHECK(rgb("box", 60, 225) == 0x1c1c1c && rgb("box", 200, 146) == 0x5a5a5a);
     /* under the box the picture is dimmed by half */
     CHECK((rgb("box", 20, 200) >> 16) > 0x78 && (rgb("box", 20, 200) >> 16) < 0x88 &&
           !(rgb("box", 20, 200) & 0xf0f0));
@@ -1533,7 +1595,8 @@ static void run_refused(void) {
 /* Play Next: the next in the folder when one plays out, and only then. */
 static void run_next(void) {
     videos("mpeg4.avi=1 first.avi,vp9-opus.webm=2 second.webm,hevc.mp4=10 tenth.mp4");
-    const char *script = "1000 shot a\n7000 shot b\n12000 shot c\n20000 shot never\n";
+    const char *script = "1000 shot a\n7000 shot b\n9500 shot late\n12000 shot c\n"
+                         "20000 shot never\n";
     play("off", "1 first.avi", script, 0);
     CHECK(says("end 1 first.avi over") && !says("open 2") && !shot("b"));
     put(".videos/settings", "next=1\n");
@@ -1543,6 +1606,9 @@ static void run_next(void) {
     CHECK(says("end 10 tenth.mp4 over") &&
           !shot("never")); /* by name, numbers as numbers; the last ends the run */
     NEAR(num("b", "pos"), 7000 - 5024, 80), NEAR(num("c", "pos"), 12000 - 5024 - 5021, 150);
+    /* one that follows by itself says what it is: the controls, for three seconds */
+    CHECK(!num("a", "controls") && num("b", "controls") && !num("late", "controls") &&
+          num("c", "controls"));
     CHECK(mark_of("1 first.avi").flags == MARK_WATCHED &&
           mark_of("2 second.webm").flags == MARK_WATCHED);
     play("left", "1 first.avi", "1000 key 170\n7000 shot b\n", 0);

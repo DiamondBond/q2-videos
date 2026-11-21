@@ -214,6 +214,15 @@ const char *time_text(long long ms, char *out, size_t n) {
     return out;
 }
 
+const char *skip_text(int secs, char *out, size_t n) {
+    int s = abs(secs);
+    if (s < 60)
+        snprintf(out, n, "%+d s", secs);
+    else
+        snprintf(out, n, "%c%d:%02d", secs < 0 ? '-' : '+', s / 60, s % 60);
+    return out;
+}
+
 int hit(int x, int y) {
     if (y < TOP_H + 8 && x >= VIEW_W - 78) return HIT_MENU; /* the dots, with a finger's room */
     if (y >= BOTTOM_Y - 4) return HIT_BAR;
@@ -249,7 +258,7 @@ static void pill(pix *page, int cx, int cy, const char *s, int px) {
 }
 
 int osd_any(const osd_t *o) {
-    return o->controls || o->paused || o->volume >= 0 || o->badge || o->notice ||
+    return o->controls || o->disc || o->target || o->volume >= 0 || o->badge || o->notice ||
            (o->subs && *o->subs) || o->menu || o->message || o->plain;
 }
 
@@ -301,20 +310,22 @@ void osd_draw(pix *page, const osd_t *o) {
             disc(page, (float)BAR_X + (float)BAR_W * (float)o->pos_ms / (float)o->dur_ms,
                  (float)BAR_Y + 3, 7, WHITE, 255);
         text_at(page, 46, 296, time_text(o->pos_ms, a, sizeof a), 14, 0, WHITE, 255);
+        if (o->paused) /* the pause's two bars, between the times */
+            fill(page, 183, 298, 3, 11, WHITE, 255), fill(page, 190, 298, 3, 11, WHITE, 255);
         if (o->dur_ms > 0) {
             time_text(o->pos_ms > o->dur_ms ? 0 : o->pos_ms - o->dur_ms, a, sizeof a);
             text_at(page, 329 - text_w(a, 14, 0), 296, a, 14, 0, WHITE, 255);
         }
     }
-    if (o->paused) { /* the pause's two bars on a flat disc */
+    if (o->disc) { /* the pause's two bars on a flat disc */
         disc(page, VIEW_W / 2.0f, VIEW_H / 2.0f, 32, 0x000000, 150);
-        fill(page, VIEW_W / 2 - 11, VIEW_H / 2 - 13, 8, 27, WHITE, 255);
-        fill(page, VIEW_W / 2 + 4, VIEW_H / 2 - 13, 8, 27, WHITE, 255);
+        fill(page, VIEW_W / 2 - 11, VIEW_H / 2 - 14, 8, 28, WHITE, 255);
+        fill(page, VIEW_W / 2 + 4, VIEW_H / 2 - 14, 8, 28, WHITE, 255);
     }
-    if (o->badge) { /* a side button's seek so far, at its side */
-        snprintf(a, sizeof a, "%+d s", o->badge);
-        pill(page, o->badge < 0 ? 78 : VIEW_W - 78, VIEW_H / 2, a, 18);
-    }
+    if (o->target) pill(page, VIEW_W / 2, VIEW_H / 2, time_text(o->pos_ms, a, sizeof a), 18);
+    if (o->badge) /* a side button's seek so far, at its side */
+        pill(page, o->badge < 0 ? 78 : VIEW_W - 78, VIEW_H / 2, skip_text(o->badge, a, sizeof a),
+             18);
     if (o->notice) pill(page, VIEW_W / 2, TOP_H + 26, o->notice, 15);
     if (o->menu) menu_draw(page, o->pop, o->menu);
 }
