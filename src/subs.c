@@ -8,6 +8,8 @@
 #include <string.h>
 #include <strings.h>
 
+#define CUE_MAX 1024 /* bytes of one cue that are looked at: four lines are far fewer */
+
 /* ---- Cues ---------------------------------------------------------------------------------- */
 
 static int cues_add(cues_t *c, long long start, long long end, const char *text) {
@@ -91,7 +93,8 @@ void ass_plain(const char *event, char *out, size_t n) {
     char *o = out, *end = out + (n ? n - 1 : 0);
     while (*p && o < end) {
         if (*p == '{') { /* an override block; \p1 starts a drawing's numbers, \p0 ends them */
-            const char *close = strchr(p, '}'), *d = p;
+            /* within CUE_MAX: a line of nothing but braces is not looked through for each */
+            const char *close = memchr(p, '}', strnlen(p, CUE_MAX)), *d = p;
             if (!close) { /* never closed: text */
                 *o++ = *p++;
                 continue;
@@ -126,7 +129,8 @@ static int stamp(const char **s, long long *ms) {
     while (*p == ' ' || *p == '\t') ++p;
     for (;; ++p) {
         if (*p < '0' || *p > '9') return 0;
-        while (*p >= '0' && *p <= '9') part[n] = part[n] * 10 + (*p++ - '0');
+        while (*p >= '0' && *p <= '9')
+            if ((part[n] = part[n] * 10 + (*p++ - '0')) > 99999999) return 0; /* no time at all */
         if (*p != ':' || ++n == 3) break;
     }
     if (n == 3 || n == 0) return 0;
@@ -169,6 +173,13 @@ int srt_parse(const char *data, size_t n, cues_t *c) {
             char *stop_at = blank || timing ? line : line + len;
             char keep = *stop_at;
             *stop_at = 0;
+            /* no more of a cue than a screen could show: a megabyte of unclosed tags would be
+             * looked through once for each of them */
+            if (stop_at - body > CUE_MAX) {
+                char *cut = body + CUE_MAX;
+                while (cut > body && (*cut & 0xc0) == 0x80) --cut; /* never a letter in half */
+                *cut = 0;
+            }
             tags_strip(body);
             if (timing) { /* cues with no empty line between: the number above the times goes */
                 char *last = strrchr(body, '\n');

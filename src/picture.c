@@ -74,19 +74,25 @@ void picture_place(pix *page, const pix *img, int line, const geom_t *g) {
 void ladder_init(ladder_t *l, int w, int h, long long now) {
     *l = (ladder_t){ .floor = (long long)w * h > 1280 * 720, .ahead_since = now, .hold = 2000 };
     l->level = l->floor;
-    l->eased_at = l->late_at = -1000000;
+    l->eased_at = l->stepped_at = -1000000;
 }
 
 int ladder_frame(ladder_t *l, long long now, int late, int keyframe) {
     if (l->level == 3 && keyframe) l->level = 2, l->ahead_since = now; /* caught up at a keyframe */
     if (late) {
-        if (now - l->late_at > 1000) l->late = 0; /* another bout */
-        l->late_at = l->ahead_since = now;
-        if (++l->late >= 3 && l->level < 3) {
-            ++l->level, l->late = 0;
+        l->ahead_since = now;
+        /* a step has half a second to work before lateness counts toward the next: one hiccup
+         * is one step, not three */
+        if (now - l->stepped_at >= 500 && ++l->late >= 3 && l->level < 3) {
+            ++l->level, l->late = 0, l->stepped_at = now;
             if (now - l->eased_at < 5000 && l->hold < 60000) l->hold *= 2; /* eased off too soon */
         }
-    } else if (l->level > l->floor && l->level < 3 && now - l->ahead_since >= l->hold)
-        --l->level, l->ahead_since = l->eased_at = now;
+    } else {
+        /* a second on time ends a bout: by frames on time, not by the clock, so frames that
+         * come late and slowly still add up */
+        if (now - l->ahead_since >= 1000) l->late = 0;
+        if (l->level > l->floor && l->level < 3 && now - l->ahead_since >= l->hold)
+            --l->level, l->ahead_since = l->eased_at = now;
+    }
     return l->level;
 }

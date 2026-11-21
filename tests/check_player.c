@@ -80,6 +80,27 @@ static void check_subs(void) {
     CHECK(srt_parse(junk, strlen(junk), &c) == 0 && srt_parse("", 0, &c) == 0 && c.n == 0);
     cues_free(&c);
 
+    /* a megabyte of tags never closed, and a time of a hundred digits: read at once, the cue cut
+     * to what a screen could hold */
+    size_t big = 1 << 20;
+    char *flood = malloc(big + 64);
+    CHECK(flood);
+    int head = sprintf(flood, "1\n00:00:01,000 --> 00:00:02,000\n");
+    for (size_t i = 0; i < big; i += 2) memcpy(flood + head + i, "<a", 2);
+    strcpy(flood + head + big, "\n\n");
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(srt_parse(flood, strlen(flood), &c) == 1 && strlen(c.v[0].text) == 1024);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    CHECK(t1.tv_sec - t0.tv_sec < 5);
+    cues_free(&c);
+    memset(flood, '9', 100), strcpy(flood + 100, ":00:01,000 --> 00:00:02,000\nnever\n\n");
+    CHECK(srt_parse(flood, strlen(flood), &c) == 0);
+    memset(flood, '{', big), flood[big] = 0;
+    ass_plain(flood, flood + big + 1, 40);
+    CHECK(strlen(flood + big + 1) == 39);
+    free(flood);
+
     char out[64], tiny[8];
     ass_plain("0,0,Default,,0,0,0,,{\\i1}Italic{\\i0} and plain", out, sizeof out);
     SAME(out, "Italic and plain");
@@ -322,25 +343,32 @@ static void check_picture(void) {
     CHECK(too_large(1920, 1080, 20000) && !too_large(1280, 720, 20000) &&
           !too_large(1920, 1080, 60000));
 
-    /* falling behind: three late frames inside a second step down the quality, to the keyframe
-     * skip at most; a keyframe ends that; two seconds on time step it up again */
+    /* falling behind: three late frames step down the quality, to the keyframe skip at most, a
+     * step no sooner than half a second after the last: a hiccup of nine late frames is one */
     ladder_t l;
     ladder_init(&l, 1280, 720, 0);
     CHECK(l.level == 0 && ladder_frame(&l, 10, 1, 0) == 0 && ladder_frame(&l, 20, 1, 0) == 0);
     CHECK(ladder_frame(&l, 30, 1, 0) == 1 && ladder_frame(&l, 40, 0, 0) == 1);
-    CHECK(ladder_frame(&l, 50, 1, 0) == 1 && ladder_frame(&l, 60, 1, 0) == 1 &&
-          ladder_frame(&l, 70, 1, 0) == 2);
-    CHECK(ladder_frame(&l, 80, 1, 0) == 2 && ladder_frame(&l, 90, 1, 0) == 2 &&
-          ladder_frame(&l, 100, 1, 0) == 3);
-    for (int i = 0; i < 9; ++i) CHECK(ladder_frame(&l, 110 + i, 1, 0) == 3); /* no further */
-    CHECK(ladder_frame(&l, 200, 0, 1) == 2); /* a keyframe: decoding again */
-    CHECK(ladder_frame(&l, 2100, 0, 0) == 2 &&
-          ladder_frame(&l, 2200, 0, 0) == 1); /* two seconds on time */
-    CHECK(ladder_frame(&l, 4100, 0, 0) == 1 && ladder_frame(&l, 4200, 0, 0) == 0 &&
+    for (int i = 0; i < 9; ++i) CHECK(ladder_frame(&l, 50 + 33 * i, 1, 0) == 1);
+    CHECK(ladder_frame(&l, 530, 1, 0) == 1 && ladder_frame(&l, 560, 1, 0) == 1 &&
+          ladder_frame(&l, 590, 1, 0) == 2);
+    for (int i = 0; i < 9; ++i) CHECK(ladder_frame(&l, 600 + 33 * i, 1, 0) == 2);
+    CHECK(ladder_frame(&l, 1090, 1, 0) == 2 && ladder_frame(&l, 1120, 1, 0) == 2 &&
+          ladder_frame(&l, 1150, 1, 0) == 3);
+    for (int i = 0; i < 9; ++i) CHECK(ladder_frame(&l, 1700 + i, 1, 0) == 3); /* no further */
+    CHECK(ladder_frame(&l, 2000, 0, 1) == 2); /* a keyframe: decoding again */
+    CHECK(ladder_frame(&l, 3900, 0, 0) == 2 &&
+          ladder_frame(&l, 4000, 0, 0) == 1); /* two seconds on time */
+    CHECK(ladder_frame(&l, 5900, 0, 0) == 1 && ladder_frame(&l, 6000, 0, 0) == 0 &&
           ladder_frame(&l, 9000, 0, 0) == 0);
-    /* late frames far apart are no trend */
-    CHECK(ladder_frame(&l, 10000, 1, 0) == 0 && ladder_frame(&l, 12000, 1, 0) == 0 &&
-          ladder_frame(&l, 14000, 1, 0) == 0);
+    /* late frames with a second on time between them are no trend */
+    for (int i = 0; i < 4; ++i)
+        CHECK(ladder_frame(&l, 10000 + 2000 * i, 1, 0) == 0 &&
+              ladder_frame(&l, 10500 + 2000 * i, 0, 0) == 0 &&
+              ladder_frame(&l, 11500 + 2000 * i, 0, 0) == 0);
+    /* frames that come out seconds apart and late each time are one: the slower, the surer */
+    CHECK(ladder_frame(&l, 20000, 1, 0) == 0 && ladder_frame(&l, 22000, 1, 0) == 0 &&
+          ladder_frame(&l, 24000, 1, 0) == 1);
     /* eased off and late again within five seconds: it holds twice as long before the next try */
     ladder_init(&l, 1280, 720, 0);
     for (int i = 0; i < 3; ++i) ladder_frame(&l, i, 1, 0);

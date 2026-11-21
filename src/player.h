@@ -107,12 +107,13 @@ void picture_place(pix *page, const pix *img, int line, const geom_t *g);
 
 /* Falling behind: the level a picture is decoded at. 0 all of it, 1 the loop filter skipped, 2
  * frames nothing refers to skipped as well, 3 everything up to the next keyframe. Three late
- * frames in a second step it up; hold ms of frames on time step it down again, hold doubling (to
- * a minute) when easing off was followed by lateness within five seconds. */
+ * frames with no second on time between them step it up, the next step no sooner than half a
+ * second on; hold ms of frames on time step it down again, hold doubling (to a minute) when
+ * easing off was followed by lateness within five seconds. */
 typedef struct {
     int level, floor; /* floor: 1 for a picture above 720p */
     int late;
-    long long late_at, ahead_since, eased_at, hold;
+    long long stepped_at, ahead_since, eased_at, hold;
 } ladder_t;
 void ladder_init(ladder_t *l, int w, int h, long long now);
 /* A frame came out of the decoder at now, late or not: the level for the next. */
