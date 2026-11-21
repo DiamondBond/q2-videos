@@ -349,8 +349,10 @@ static int shed(int starving) {
         return 0;
     AVRational tb = E.ic->streams[E.vi]->time_base;
     long long at = head->pkt->dts != AV_NOPTS_VALUE ? head->pkt->dts : head->pkt->pts;
-    if (at == AV_NOPTS_VALUE || av_rescale_q(at, tb, AV_TIME_BASE_Q) > c - (starving ? 0 : LATE_US))
-        return 0;
+    if (at == AV_NOPTS_VALUE) return 0;
+    long long due = av_rescale_q(at, tb, AV_TIME_BASE_Q);
+    /* not due, or not behind enough; and timestamps that far apart are a jump, not lateness */
+    if (due > c - (starving ? 0 : LATE_US) || c - due >= E.jump_us) return 0;
     for (node_t *n = head->next; n && n->pkt && !to; n = n->next)
         if (n->pkt->flags & AV_PKT_FLAG_KEY) {
             at = n->pkt->dts != AV_NOPTS_VALUE ? n->pkt->dts : n->pkt->pts;
