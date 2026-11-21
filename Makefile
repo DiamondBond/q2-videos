@@ -25,7 +25,7 @@ COMMON_SRC = src/main.c src/common.c src/store.c src/library.c
 PLAYER_SRC =
 
 # The page's server (serve_main):
-SERVE_SRC =
+SERVE_SRC = src/serve.c src/thumb.c
 
 # The Q2's build alone (the start file, and what needs the Q2: its screen, ALSA):
 Q2_ONLY_SRC = src/crt-q2.c
@@ -37,7 +37,7 @@ HOST_ONLY_SRC =
 STUB_SRC = src/stubs.c
 
 # The rows' static covers, JPEGs: copied beside the binary and packed into the zip.
-TILES =
+TILES = assets/tile-folder.jpg assets/tile-settings.jpg assets/tile-nopicture.jpg
 
 SRC = $(COMMON_SRC) $(PLAYER_SRC) $(SERVE_SRC)
 Q2_OBJ = $(patsubst src/%.c,build/q2/%.o,$(SRC) $(Q2_ONLY_SRC) $(STUB_SRC))
@@ -116,6 +116,11 @@ check-q2: $(DIST)/q2-videos build/q2/check build/q2root
 	$(QEMU) $(DIST)/q2-videos --version
 	cd build/q2 && $(QEMU) ./check # in there: its build/check-card is not the host check's
 
+# The Q2's server under $(QEMU), started as run starts it and spoken to over its socket by the
+# host's check: the covers looked at are then the ones the Q2's own libavcodec made.
+qemu-check: $(DIST)/q2-videos build/host/check_serve build/q2root
+	./build/host/check_serve $(QEMU) $(DIST)/q2-videos
+
 clean:
 	rm -rf build dist
-.PHONY: all host check check-q2 clean
+.PHONY: all host check check-q2 qemu-check clean
