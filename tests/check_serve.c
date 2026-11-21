@@ -1105,13 +1105,27 @@ static void await_covers(int ms, int rows, int pictures) {
     CHECK(!pictures);
 }
 
+/* The card of the run: these clips at the top with killer.mp4, a copy of one, and two in a
+ * folder. Three of them have no picture to make a thumbnail of: one has none, one has a song's
+ * cover alone, and one is in a codec the Q2 has no decoder for. */
+static const char *const TOP[] = { "60fps.mp4",    "anamorphic.mp4", "audio-only.mp4",
+                                   "av1.mkv",      "big-1080p.mp4",  "cover.mp4",
+                                   "h264-aac.mp4", "hevc.mp4",       "mpeg4.avi",
+                                   "no-audio.mp4", "rotated.mp4",    "sidecar.mp4",
+                                   "vp9-opus.webm" };
+enum {
+    TOPS = sizeof TOP / sizeof *TOP + 1, /* the videos at the top */
+    BLANK = 3,                           /* audio-only.mp4, cover.mp4, av1.mkv */
+    ROWS = TOPS + 2,                     /* the top's rows: the folder, the videos, Settings */
+    ALL = TOPS + 2                       /* the card's videos */
+};
+
 static void check_server(char **cmd, int host) {
     look_t k;
     int pictures, lock;
     sh("rm -rf " ECARD " " ETMP " && mkdir -p " ECARD "/Videos/Series " ECARD "/.videos " ETMP);
-    sh("cp -p '%s'/*.mp4 '%s'/*.avi '%s'/*.webm " ECARD "/Videos/ && cp -p '%s'/*.mkv " ECARD
-       "/Videos/Series/",
-       clips, clips, clips, clips);
+    for (int i = 0; i < TOPS - 1; ++i) sh("cp -p '%s/%s' " ECARD "/Videos/", clips, TOP[i]);
+    sh("cp -p '%s/ass.mkv' '%s/two-audio-subs.mkv' " ECARD "/Videos/Series/", clips, clips);
     sh("cp assets/tile-*.jpg " ECARD "/.videos/ && cp " ECARD "/Videos/60fps.mp4 " ECARD
        "/Videos/killer.mp4");
     text(ETMP "/q2-addon.caps", CAPS "\n");
@@ -1121,17 +1135,17 @@ static void check_server(char **cmd, int host) {
 
     /* its start: an earlier run's socket and covers gone, the list answered before any thumbnail */
     start(cmd, host ? "VIDEOS_CRASH=killer" : 0);
-    CHECK(ask("menu") == 13 && covers() == 2 && access(ETMP "/q2-videos.art/deadbeef.jpg", 0));
+    CHECK(ask("menu") == ROWS && covers() == 2 && access(ETMP "/q2-videos.art/deadbeef.jpg", 0));
     row_is(0, "list", "dir", "Series", "2 videos", "Series", "");
-    row_is(12, "list", "settings", "Settings", "", "", "");
+    row_is(ROWS - 1, "list", "settings", "Settings", "", "", "");
     /* The thumbnails, as they come. The host build's worker dies on killer.mp4 (the checks'
      * hook, a decoder's crash): the server answers on, that video has the "no picture" tile, and
-     * the others their thumbnails. audio-only.mp4 has no picture either. */
-    await_covers(host ? 60000 : 240000, 12, host ? 9 : 10);
+     * the others their thumbnails. */
+    await_covers(host ? 60000 : 240000, ROWS - 1, TOPS - BLANK - host);
     CHECK(ask("dir\tSeries") == 2);
     for (long long end = now_ms() + 60000; covers() < 2; nap(200))
         CHECK(now_ms() < end && ask("dir\tSeries") == 2);
-    CHECK(index_lines(ECARD, &pictures) == 13 && pictures == (host ? 11 : 12));
+    CHECK(index_lines(ECARD, &pictures) == ALL && pictures == ALL - BLANK - host);
     index_load();
     CHECK(index_find(key_of(ECARD "/Videos", "killer.mp4"))->state == (host ? T_NONE : T_PICTURE));
     index_free();
@@ -1141,9 +1155,9 @@ static void check_server(char **cmd, int host) {
     char gone[PATH_N];
     snprintf(gone, sizeof gone, ECARD "/.videos/cache/%016llx.jpg",
              key_of(ECARD "/Videos", "mpeg4.avi"));
-    CHECK(!unlink(gone) && ask("menu") == 13);
-    for (long long end = now_ms() + 60000; access(gone, 0) || covers() < 13; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 13);
+    CHECK(!unlink(gone) && ask("menu") == ROWS);
+    for (long long end = now_ms() + 60000; access(gone, 0) || covers() < ROWS; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS);
     cover_ok(art_path("play", "mpeg4.avi"), &k);
     CHECK(same_file(art_path("play", "mpeg4.avi"), gone));
 
@@ -1168,13 +1182,13 @@ static void check_server(char **cmd, int host) {
     /* while a video plays (the player's lock) the worker makes nothing: a new video waits */
     CHECK((lock = lock_take(1)) >= 0);
     sh("cp " ECARD "/Videos/mpeg4.avi " ECARD "/Videos/new.avi");
-    CHECK(ask("menu") == 14 && covers() == 13);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS);
     nap(2500);
-    CHECK(ask("menu") == 14 && covers() == 13 && index_lines(ECARD, &pictures) == 13);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS && index_lines(ECARD, &pictures) == ALL);
     close(lock);
-    for (long long end = now_ms() + 60000; covers() < 14; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 14);
-    CHECK(index_lines(ECARD, &pictures) == 14 && pictures == (host ? 12 : 13));
+    for (long long end = now_ms() + 60000; covers() < ROWS + 1; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+    CHECK(index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL + 1 - BLANK - host);
     stop();
 
     /* started again: the cache is there, so every cover is in its first reply; and it is tidied
@@ -1185,14 +1199,15 @@ static void check_server(char **cmd, int host) {
     snprintf(line, sizeof line, "%016llx\t", key_of(ECARD "/Videos", "new.avi"));
     CHECK(!access(left, 0) && !unlink(ECARD "/Videos/new.avi"));
     start(cmd, 0);
-    CHECK(ask("menu") == 13 && covers() == 13);
+    CHECK(ask("menu") == ROWS && covers() == ROWS);
     for (long long end = now_ms() + 60000;; nap(100)) {
         CHECK(now_ms() < end && (lines = file_get(ECARD "/.videos/cache/index", 0)));
         int there = strstr(lines, line) != 0;
         free(lines);
         if (!there) break;
     }
-    CHECK(access(left, 0) && index_lines(ECARD, &pictures) == 13 && pictures == (host ? 11 : 12));
+    CHECK(access(left, 0) && index_lines(ECARD, &pictures) == ALL &&
+          pictures == ALL - BLANK - host);
     stop();
     /* a TERM while the worker is in the middle of a library */
     sh("rm -rf " ECARD "/.videos/cache");
@@ -1207,7 +1222,7 @@ static void check_server(char **cmd, int host) {
     CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < THUMB_MS + 1000);
     int had = index_lines(ECARD, &pictures);
     nap(1200);
-    CHECK(index_lines(ECARD, &pictures) == had && had < 53); /* it was not through */
+    CHECK(index_lines(ECARD, &pictures) == had && had < ALL + 40); /* it was not through */
     close(lock);
     stop();
     if (!host) return;
@@ -1218,12 +1233,12 @@ static void check_server(char **cmd, int host) {
     sh("rm -rf " ECARD "/Videos/copy*.mp4 " ECARD "/.videos/cache && cp " ECARD
        "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
     start(cmd, "VIDEOS_HANG=hang VIDEOS_STUCK_MS=1000");
-    CHECK(ask("menu") == 14);
-    for (long long end = now_ms() + 60000; covers() < 14; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 14);
+    CHECK(ask("menu") == ROWS + 1);
+    for (long long end = now_ms() + 60000; covers() < ROWS + 1; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
     CHECK(same_file(art_path("play", "hang.mp4"), "assets/tile-nopicture.jpg"));
     cover_ok(art_path("play", "killer.mp4"), &k);
-    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == 14 && pictures == 12);
+    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL - BLANK);
     began = now_ms();
     CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < 1000);
     close(lock);
@@ -1235,7 +1250,7 @@ static void check_server(char **cmd, int host) {
     start(cmd, "VIDEOS_IDLE_MS=1500");
     began = now_ms();
     nap(1000);
-    CHECK(ask("menu") == 13); /* a request at 1 s: 1.5 s from then */
+    CHECK(ask("menu") == ROWS); /* a request at 1 s: 1.5 s from then */
     CHECK(ended(1200) == -2 && ended(2500) == 0 && now_ms() - began > 2400);
     CHECK(access(sock, 0) && access(ETMP "/q2-videos.art", 0));
     /* ...and never while a video plays (the player's lock), during which Q2 Pod asks nothing,
