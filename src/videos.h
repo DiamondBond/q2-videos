@@ -172,7 +172,7 @@ int lib_all(const char *root, listing_t *l);
 void lib_free(listing_t *l);
 /* A video's title into out: its file name less the extension. path may be relative. */
 const char *lib_title(const char *path, char *out, size_t n);
-/* Play Next: the video listed after the one at rel in its folder (sort as the list's), its path
+/* Autoplay: the video listed after the one at rel in its folder (sort as the list's), its path
  * into out. 0 when rel was the last, or is gone. */
 int lib_next(const char *root, const char *rel, int sort, char *out, size_t n);
 /* Continue Watching: the unfinished mark played last whose video is still on the card with the
@@ -181,10 +181,9 @@ const mark_t *lib_continue(const char *root, const marks_t *m);
 
 /* A row's subtitle texts, into out, which is returned. A length: "1 h 42 min", "2 h", "24 min",
  * "45 s"; "" when it is unknown (0). What is left: "23 min left", "1 h 5 min left", "Less than
- * a minute left". A size: "1.2 GB", "350 MB", "12 KB". */
+ * a minute left". */
 const char *text_length(long long ms, char *out, size_t n);
 const char *text_left(long long pos_ms, long long dur_ms, char *out, size_t n);
-const char *text_size(long long bytes, char *out, size_t n);
 
 /* FNV-1a over n bytes, from h: FNV32 or FNV64 to start, or an earlier result to go on. */
 #define FNV32 2166136261u

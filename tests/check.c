@@ -253,18 +253,6 @@ static void check_names(void) {
     SAME(text_left(9000, 5000, t, sizeof t), "Less than a minute left"); /* past the end */
     SAME(text_left(5000, 0, t, sizeof t), "Less than a minute left");    /* no length known */
 
-    const long long KB = 1024, MB = KB * KB, GB = MB * KB;
-    SAME(text_size(0, t, sizeof t), "0 KB"), SAME(text_size(-1, t, sizeof t), "0 KB");
-    SAME(text_size(1023, t, sizeof t), "1 KB"), SAME(text_size(12 * KB, t, sizeof t), "12 KB");
-    SAME(text_size(999 * KB, t, sizeof t), "999 KB");
-    SAME(text_size(1000 * KB, t, sizeof t), "1 MB");
-    SAME(text_size(350 * MB, t, sizeof t), "350 MB");
-    SAME(text_size(999 * MB, t, sizeof t), "999 MB");
-    SAME(text_size(1000 * MB, t, sizeof t), "1.0 GB"), SAME(text_size(GB, t, sizeof t), "1.0 GB");
-    SAME(text_size(GB + GB / 5, t, sizeof t), "1.2 GB");
-    SAME(text_size(5 * GB, t, sizeof t), "5.0 GB");
-    SAME(text_size(64 * GB - 1, t, sizeof t), "64.0 GB");
-
     CHECK(fnv32(FNV32, "a", 1) == 0xe40c292c && fnv32(FNV32, "", 0) == 0x811c9dc5);
     CHECK(fnv32(FNV32, "foobar", 6) == 0xbf9cf968);
     CHECK(fnv32(fnv32(FNV32, "foo", 3), "bar", 3) == 0xbf9cf968); /* goes on from a result */
@@ -356,7 +344,7 @@ static void check_library(void) {
     CHECK(!lib_all(CARD "/Nope", &l) && !l.n); /* no folder is not an empty library */
     CHECK(lib_all(CARD "/VIDEOS/Empty", &l) && !l.n);
 
-    /* Play Next: the one after it in its folder's list, in the list's order */
+    /* Autoplay: the one after it in its folder's list, in the list's order */
     CHECK(lib_next(root, "Episode 1.MP4", SORT_NAME, p, sizeof p)), SAME(p, "episode 2.mkv");
     CHECK(lib_next(root, "episode 2.mkv", SORT_NAME, p, sizeof p)), SAME(p, "Episode 10.mkv");
     CHECK(!lib_next(root, "Episode 10.mkv", SORT_NAME, p, sizeof p)); /* the last */

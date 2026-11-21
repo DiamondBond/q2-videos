@@ -1721,7 +1721,7 @@ static void run_refused(void) {
     CHECK(says("fail The file is damaged or isn't a video.\n") && !says("ready"));
 }
 
-/* Play Next: the next in the folder when one plays out, and only then. */
+/* Autoplay: the next in the folder when one plays out, and only then. */
 static void run_next(void) {
     videos("mpeg4.avi=1 first.avi,vp9-opus.webm=2 second.webm,hevc.mp4=10 tenth.mp4");
     const char *script = "1000 shot a\n7000 shot b\n9500 shot late\n12000 shot c\n"

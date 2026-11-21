@@ -114,6 +114,10 @@ AVFormatContext *input_open(const char *path, int (*stop)(void *), void *arg, in
     if (ic) {
         ic->interrupt_callback = (AVIOInterruptCB){ stop, arg };
         snprintf(url, sizeof url, "file:%s", path);
+        /* a file from anyone's card: only the containers named, and nothing but files. No check
+         * can show the second line missing: none of FFmpeg 4.2's readers named opens another
+         * resource by itself (mov's external tracks are off by default). It stays for one that
+         * would. */
         av_dict_set(&opts, "format_whitelist", FORMATS, 0);
         av_dict_set(&opts, "protocol_whitelist", "file", 0);
         if ((r = avformat_open_input(&ic, url, 0, &opts)) < 0) ic = 0; /* a failed open freed it */

@@ -272,19 +272,6 @@ const char *text_left(long long pos_ms, long long dur_ms, char *out, size_t n) {
     return out;
 }
 
-const char *text_size(long long bytes, char *out, size_t n) {
-    const long long KB = 1024, MB = KB * KB, GB = MB * KB;
-    if (bytes < 0) bytes = 0;
-    if (bytes >= 1000 * MB) { /* tenths, rounded */
-        long long t = (bytes * 10 + GB / 2) / GB;
-        snprintf(out, n, "%lld.%lld GB", t / 10, t % 10);
-    } else if (bytes >= 1000 * KB)
-        snprintf(out, n, "%lld MB", (bytes + MB / 2) / MB);
-    else
-        snprintf(out, n, "%lld KB", (bytes + KB / 2) / KB);
-    return out;
-}
-
 unsigned fnv32(unsigned h, const void *data, size_t n) {
     for (const unsigned char *p = data; n--; ++p) h = (h ^ *p) * 16777619u;
     return h;
