@@ -75,6 +75,15 @@ ff -f lavfi -i "$(pic 640x360 25 10)" -f lavfi -i "$(tone 440 48000 10)" \
     -metadata:s:a:1 language=jpn -metadata:s:a:1 title=日本語 \
     -metadata:s:s:0 language=eng "$OUT/two-audio-subs.mkv"
 
+# The same with twelve chapters, 0.8 s each: a list longer than the screen shows at once
+{
+    echo ';FFMETADATA1'
+    for i in 0 1 2 3 4 5 6 7 8 9 10 11; do
+        printf '[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=Chapter %d\n' $((i * 800)) $((i * 800 + 800)) $((i + 1))
+    done
+} >"$T/twelve"
+ff -i "$OUT/two-audio-subs.mkv" -i "$T/twelve" -map 0 -map_metadata 1 -map_chapters 1 -c copy "$OUT/chapters.mkv"
+
 # A video with its subtitles beside it. sidecar.srt is UTF-8 with a cue in Latin-1 (é and à as
 # one byte each) and SubRip's tags; sidecar-bom.srt is all UTF-8, a BOM first, CRLF line ends.
 x264 sidecar "$(pic 640x360 25 10)"
@@ -141,10 +150,62 @@ EOF
 ff -f lavfi -i "$(pic 640x360 25 10)" -f lavfi -i "$(tone 440 48000 10)" -i "$T/subs.ass" \
     -c:v mpeg4 -q:v 5 -c:a aac -ac 2 -c:s ass "$OUT/ass.mkv"
 
-# every clip through 4.2's decoders, whole
-for clip in "$OUT"/*.mp4 "$OUT"/*.mkv "$OUT"/*.avi "$OUT"/*.webm; do
-    [ -f "$clip" ] || continue
-    said=$(ff -xerror -i "$clip" -f null - 2>&1) && [ -z "$said" ] ||
+# H.265 in MP4
+if "$SYS" -hide_banner -encoders 2>/dev/null | grep -q libx265; then
+    sys -f lavfi -i "$(pic)" -c:v libx265 -preset ultrafast -pix_fmt yuv420p -x265-params log-level=error "$T/hevc.mkv"
+    ff -i "$T/hevc.mkv" -f lavfi -i "$(tone)" -c:v copy -tag:v hvc1 -c:a aac -ac 2 "$OUT/hevc.mp4"
+else
+    echo "hevc.mp4 skipped: $SYS has no libx265" >&2
+fi
+
+# Two minutes, small, a keyframe every two seconds: to resume in and to seek about
+x264 long "$(pic 320x180 25 120)" -g 50
+ff -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 120)" -c:v copy -c:a aac -ac 2 -b:a 64k \
+    -movflags +faststart "$OUT/long.mp4"
+
+# A transport stream, whose timestamps start above zero; and two of them end to end, where the
+# timestamps start again half way
+ff -i "$T/silent.mkv" -f lavfi -i "$(tone)" -c:v copy -c:a mp2 -ac 2 -f mpegts "$OUT/offset.ts"
+cat "$OUT/offset.ts" "$OUT/offset.ts" >"$OUT/jump.ts"
+
+# A transport stream's timestamps are 33 bits of a 90 kHz clock: this one's run out and start
+# again from nothing under three seconds in
+ff -i "$T/silent.mkv" -f lavfi -i "$(tone)" -c:v copy -c:a mp2 -ac 2 -output_ts_offset 95441 \
+    -f mpegts "$OUT/wrap.ts"
+
+# A sound that stops a second in under a picture that goes on for twenty, and a picture of noise
+# that takes megabytes: what is read ahead of it is held to its limit by bytes alone
+x264 noisy "$(pic 640x360 25 20),noise=alls=40:allf=t+u" -b:v 3600k
+ff -i "$T/noisy.mkv" -f lavfi -i "$(tone 440 48000 1)" -c:v copy -c:a aac -ac 2 "$OUT/short-sound.mkv"
+
+# Frames that come unevenly: 25 in one second, then 5 in the next, three times (Matroska keeps
+# each frame's own time)
+x264 vfr "$(pic 640x360 25 6),select='lt(mod(n\,50)\,25)+not(mod(n\,5))'"
+ff -i "$T/vfr.mkv" -f lavfi -i "$(tone 440 48000 6)" -c:v copy -c:a aac -ac 2 "$OUT/vfr.mkv"
+
+# AV1, which the Q2 has no decoder for: the player must say so
+if "$SYS" -hide_banner -encoders 2>/dev/null | grep -q libaom-av1; then
+    sys -f lavfi -i "$(pic 320x180 25 1)" -c:v libaom-av1 -cpu-used 8 -crf 45 -b:v 0 "$T/av1.mkv"
+    ff -i "$T/av1.mkv" -f lavfi -i "$(tone 440 48000 1)" -c:v copy -c:a aac -ac 2 "$OUT/av1.mkv"
+else
+    echo "av1.mkv skipped: $SYS has no libaom-av1" >&2
+fi
+
+# The other subtitles a file can hold as text: MP4's own, and WebVTT
+ff -i "$T/sidecar.mkv" -f lavfi -i "$(tone 440 48000 10)" -i "$T/subs.srt" -c:v copy -c:a aac -ac 2 \
+    -c:s mov_text -metadata:s:s:0 language=rus "$OUT/movtext.mp4"
+ff -i "$T/sidecar.mkv" -f lavfi -i "$(tone 440 48000 10)" -i "$T/subs.srt" -c:v copy -c:a aac -ac 2 \
+    -c:s webvtt "$OUT/webvtt.mkv"
+
+# A song with its cover: sound, and one still picture
+ff -f lavfi -i "testsrc2=size=300x300:duration=1" -frames:v 1 "$T/cover.png"
+ff -f lavfi -i "$(tone)" -i "$T/cover.png" -map 0 -map 1 -c:a aac -ac 2 -c:v png \
+    -disposition:v:0 attached_pic "$OUT/cover.mp4"
+
+# every clip through 4.2's decoders, whole (but the one it has no decoder for)
+for clip in "$OUT"/*.mp4 "$OUT"/*.mkv "$OUT"/*.avi "$OUT"/*.webm "$OUT"/*.ts; do
+    [ -f "$clip" ] && [ "${clip##*/}" != av1.mkv ] || continue
+    said=$(ff -xerror -i "$clip" -vsync vfr -f null - 2>&1) && [ -z "$said" ] ||
         { echo "$clip: FFmpeg 4.2 can't decode it: $said" >&2; exit 1; }
     printf '%-20s %8d bytes  %s\n' "${clip##*/}" "$(stat -c %s "$clip")" \
         "$("$AV/host/bin/ffprobe" -v error -show_entries format=duration:stream=codec_name \
