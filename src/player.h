@@ -146,6 +146,8 @@ long alsa_write(const short *s, long frames); /* all of them, waiting; -1 when i
 long alsa_unheard(long long written); /* of the frames written since open or drop: not yet heard */
 void alsa_drop(void);                 /* what it holds is let go; ready for more */
 void alsa_close(void);
+/* The headphone DAC muted, if this run unmuted it. Any thread's. */
+void alsa_mute(void);
 #endif
 
 /* ---- engine.c ------------------------------------------------------------------------------ */
@@ -172,7 +174,7 @@ typedef struct {
     int ok;    /* 0: listed, not playable (subtitles that are pictures) */
 } track_t;
 typedef struct {      /* an opened video */
-    long long dur_ms; /* 0 unknown */
+    long long dur_ms; /* 0 unknown; it grows when the file plays on past the length it gave */
     int video, sound; /* it has a picture, a sound */
     int w, h;
     int naudio, audio_cur; /* audio_cur: audio[]'s on, -1 none */
@@ -211,12 +213,13 @@ typedef struct {
 } snap_t;
 
 /* Starts playing the video at path from start_ms: its threads begin, and eng_poll says when it
- * is open (ENG_READY, eng_media filled in) or why it isn't (ENG_FAILED, eng_why). device is
+ * is open (ENG_READY, eng_media filled in) or why it isn't (ENG_FAILED, eng_why). known_ms is the
+ * length the video's mark has (0 none), for a file that proved longer than it says. device is
  * Q2 Pod's ("plughw:0,0", "plug:bluealsa", "usb"), 0 for none; audio the sound track wanted (the
  * nth, -1 the default); sub the file's own subtitles to decode from the first packet on (the nth,
  * -1 none); fill Fit to Screen. */
-void eng_open(const char *path, long long start_ms, const char *device, int gain, int audio,
-              int sub, int fill);
+void eng_open(const char *path, long long start_ms, long long known_ms, const char *device,
+              int gain, int audio, int sub, int fill);
 const char *eng_why(void);
 const media_t *eng_media(void);
 /* What the main thread needs each pass, at once. cur is its picture: when one is due it is

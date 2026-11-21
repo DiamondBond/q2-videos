@@ -135,7 +135,11 @@ static struct {
     /* the file */
     int state;
     char why[160];
-    media_t m;
+    media_t m;          /* the main thread's once it is open (eng_media), its length too */
+    long long dur_ms;   /* the length as the reader has it: eng_poll hands it on */
+    long long known_ms; /* the length the video's mark has, 0 none */
+    long long size;     /* the file's bytes, 0 unknown */
+    int spliced;        /* its timestamps start again midway: places in it go by bytes */
     AVFormatContext *ic;
     AVCodecContext *vdec;
     int vi, ai, still;  /* the streams playing, -1 none; still: the picture is a cover */
@@ -363,7 +367,12 @@ static int media_open(void) {
     /* A transport stream's timestamps may start again anywhere, so ten seconds apart is a jump
      * there; elsewhere a gap that long is a gap (a still frame, a silence), as ffplay has it. */
     E.jump_us = ic->iformat->flags & AVFMT_TS_DISCONT ? 10000000 : 3600000000LL;
-    E.m.dur_ms = ic->duration != AV_NOPTS_VALUE && ic->duration > 0 ? ic->duration / 1000 : 0;
+    E.dur_ms = ic->duration != AV_NOPTS_VALUE && ic->duration > 0 ? ic->duration / 1000 : 0;
+    E.size = ic->pb && avio_size(ic->pb) > 0 ? avio_size(ic->pb) : 0;
+    /* a transport stream that played on well past the length it gives, the last time: the
+     * length it had by then is the better one, and the place it is to start from is by that */
+    if (ic->iformat->flags & AVFMT_TS_DISCONT && E.dur_ms && E.known_ms > E.dur_ms + 10000)
+        E.dur_ms = E.known_ms, E.spliced = 1;
 
     /* the sound tracks there is a decoder for */
     int deaf = -1; /* one there is none for */
@@ -504,14 +513,18 @@ static void subtitle(AVCodecContext *dec, const AVStream *st, AVPacket *pkt, int
 
 /* A transport stream's timestamps can start again midway (two recordings end to end, a
  * broadcast's clock wrapping round). From there on every packet's are moved by what they
- * jumped, as ffmpeg's own tools do, so the decoders and the clock see one run of time (the place
- * then waits at the length the file gave, which knows nothing of it). A jump is ten seconds on,
- * or a tenth back, from where the stream's next packet should be (*next); *off is what has been
- * added so far. */
-static void joined(AVPacket *pkt, AVRational tb, long long *next, long long *off) {
+ * jumped, as ffmpeg's own tools do, so the decoders and the clock see one run of time. A jump is
+ * ten seconds on, or a tenth back, from where the stream's next packet should be (*next); *off
+ * is what has been added so far. A time can then be in the file twice, so a seek in one that
+ * has jumped goes by bytes (reader_main), and the first packet read after it is at the place
+ * asked for (*place, NONE otherwise). */
+static void joined(AVPacket *pkt, AVRational tb, long long *next, long long *off,
+                   long long *place) {
     if (next && pkt->dts != AV_NOPTS_VALUE) {
-        long long at = av_rescale_q(pkt->dts, tb, AV_TIME_BASE_Q) + *off, by = at - *next;
-        if (*next != NONE && (by > E.jump_us || by < -100000)) *off -= by, at -= by;
+        long long at = av_rescale_q(pkt->dts, tb, AV_TIME_BASE_Q), by;
+        if (*place != NONE) *off = *place - at, *place = NONE;
+        at += *off, by = at - *next;
+        if (*next != NONE && (by > E.jump_us || by < -100000)) *off -= by, at -= by, E.spliced = 1;
         *next = at + av_rescale_q(pkt->duration, tb, AV_TIME_BASE_Q);
     }
     long long add = av_rescale_q(*off, AV_TIME_BASE_Q, tb);
@@ -525,7 +538,8 @@ static void *reader_main(void *unused) {
     AVPacket *pkt = av_packet_alloc();
     int si = -1, aswitch = 0, serial = 0, want_key, keyless = 0;
     long long ahead = NONE, ahead_to = 0; /* a seek ahead's: the place to get past, and its own */
-    long long off = 0, vnext = NONE, anext = NONE; /* joined()'s */
+    long long off = 0, vnext = NONE, anext = NONE, place = NONE; /* joined()'s */
+    long long read_ms = 0; /* how far into the video the packets read reach */
     int ok = pkt && media_open();
     lock();
     E.state = ok ? ENG_READY : ENG_FAILED;
@@ -539,19 +553,28 @@ static void *reader_main(void *unused) {
             serial = E.serial, E.seek.pending = 0, E.eof = 0;
             pq_flush(&E.vq), pq_flush(&E.aq);
             memset(E.cue, 0, sizeof E.cue);
+            /* where its timestamps start again a time is no one place: by bytes then, as far
+             * into the file as the place is into its length */
+            long long bytes =
+                E.spliced && E.size && E.dur_ms
+                    ? av_rescale(E.size, E.seek.ms < E.dur_ms ? E.seek.ms : E.dur_ms, E.dur_ms)
+                    : -1;
             unlock();
+            if (bytes >= 0) av_seek_frame(E.ic, -1, bytes, AVSEEK_FLAG_BYTE);
             /* the keyframe before it; before the first of them, the first */
-            if (av_seek_frame(E.ic, -1, us, AVSEEK_FLAG_BACKWARD) < 0)
+            else if (av_seek_frame(E.ic, -1, us, AVSEEK_FLAG_BACKWARD) < 0)
                 av_seek_frame(E.ic, -1, us, 0);
             if (sdec) avcodec_flush_buffers(sdec);
             lock();
             /* ahead, that keyframe must be at least half the way on from where it was (seen when
              * it is read): +10 s then lands 5 to 10 s on, or at the first keyframe after */
-            ahead = how == SEEK_AHEAD && E.vi >= 0 && !E.still ? (E.seek.from + us) / 2 : NONE;
+            ahead = how == SEEK_AHEAD && E.vi >= 0 && !E.still && bytes < 0 ? (E.seek.from + us) / 2
+                                                                            : NONE;
             ahead_to = us;
             E.rserial = serial, E.skip_us = skip, E.skip_serial = serial;
             want_key = E.vi >= 0 && !E.still, keyless = 0;
-            off = 0, vnext = anext = NONE; /* the file's own timestamps again */
+            /* the file's own timestamps again, or what it reads next is at the place */
+            off = 0, vnext = anext = NONE, place = bytes < 0 ? NONE : us;
             kick();
             continue;
         }
@@ -597,18 +620,33 @@ static void *reader_main(void *unused) {
         lock();
         if (r == AVERROR(EAGAIN)) continue;
         if (r < 0) { /* the end, or a tail that can't be read: the same */
+            if (E.dur_ms && read_ms > E.dur_ms) E.dur_ms = read_ms; /* and now it is known */
             E.eof = 1;
             if (E.vi >= 0) pq_put(&E.vq, 0, serial);
             if (E.ai >= 0) pq_put(&E.aq, 0, serial);
             kick(), notify();
             continue;
         }
+        AVRational tb = E.ic->streams[pkt->stream_index]->time_base;
         if (E.ic->iformat->flags & AVFMT_TS_DISCONT)
-            joined(pkt, E.ic->streams[pkt->stream_index]->time_base,
+            joined(pkt, tb,
                    pkt->stream_index == E.vi   ? &vnext
                    : pkt->stream_index == E.ai ? &anext
                                                : 0,
-                   &off);
+                   &off, &place);
+        if ((pkt->stream_index == E.vi || pkt->stream_index == E.ai) &&
+            pkt->dts != AV_NOPTS_VALUE) {
+            long long t =
+                (av_rescale_q(pkt->dts + pkt->duration, tb, AV_TIME_BASE_Q) - E.start_us) / 1000;
+            if (t > read_ms) read_ms = t;
+            /* A file that goes on past the length it gave (a recording added to another) is
+             * longer than it says: by as much as it has still to be read, if its bytes come as
+             * evenly as they have so far; at the least, as long as what was read. */
+            if (E.dur_ms && t > E.dur_ms) {
+                long long all = pkt->pos > 0 && E.size ? av_rescale(t, E.size, pkt->pos) : t;
+                E.dur_ms = all > t ? all : t;
+            }
+        }
         if (pkt->stream_index == E.vi) {
             /* after a seek the picture starts at a keyframe; a stream that marks none gets going
              * all the same */
@@ -1150,23 +1188,25 @@ static pthread_t spawn(void *(*run)(void *), void *arg) {
     sigset_t set, old; /* signals are the main thread's: these never see one */
     sigemptyset(&set), sigaddset(&set, SIGTERM), sigaddset(&set, SIGINT);
     pthread_sigmask(SIG_BLOCK, &set, &old);
-    if (pthread_create(&th, 0, run, arg)) abort(); /* no thread, no player */
+    if (pthread_create(&th, 0, run, arg))
+        exit(1); /* no thread, no player: exit gives the screen back */
     pthread_sigmask(SIG_SETMASK, &old, 0);
     return th;
 }
 
 static au_t *audio_start(int device, long long start) {
     au_t *a = calloc(1, sizeof *a);
-    if (!a) abort();
+    if (!a) exit(1);
     a->w.on = a->w.busy = 1, a->device = device, a->start = start, a->serial = E.serial;
     E.au = a;
     a->w.th = spawn(audio_main, a);
     return a;
 }
 
-void eng_open(const char *path, long long start_ms, const char *device, int gain, int audio,
-              int sub, int fill) {
+void eng_open(const char *path, long long start_ms, long long known_ms, const char *device,
+              int gain, int audio, int sub, int fill) {
     static int made;
+    wake_fd(); /* made before any thread could have something to say */
     if (!made) {
         pthread_condattr_t attr; /* timed waits on the clock now_ms reads */
         pthread_condattr_init(&attr);
@@ -1180,10 +1220,10 @@ void eng_open(const char *path, long long start_ms, const char *device, int gain
     E.gain = gain, E.fill = fill, E.want_audio = audio, E.want_sub = -1, E.sub_nth = sub;
     E.state = ENG_OPENING, E.vi = E.ai = -1;
     E.first_serial = E.shown_serial = E.clk.serial = E.skip_serial = -1;
-    E.target_ms = start_ms;
+    E.target_ms = start_ms, E.known_ms = known_ms;
     if (start_ms > 0) E.seek.pending = 1, E.seek.how = SEEK_BACK, E.seek.ms = start_ms;
     for (int i = 0; i < PICS; ++i)
-        if (!(E.pic[i].px = malloc(PAGE_PX * sizeof(pix)))) abort();
+        if (!(E.pic[i].px = malloc(PAGE_PX * sizeof(pix)))) exit(1);
     E.on = 1;
     E.reader.on = E.reader.busy = E.video.on = E.video.busy = 1;
     E.reader.th = spawn(reader_main, 0);
@@ -1241,7 +1281,10 @@ void eng_poll(snap_t *s, pix **cur) {
     long long pos = ok      ? (c - E.start_us) / 1000
                     : shown ? (E.shown_us - E.start_us) / 1000
                             : E.target_ms;
-    s->pos_ms = pos < 0 ? 0 : E.m.dur_ms && pos > E.m.dur_ms ? E.m.dur_ms : pos;
+    s->pos_ms = pos < 0 ? 0 : pos;
+    /* the length is the reader's to learn (a file can be longer than it says) and this thread's
+     * to read: handed over here, under the lock */
+    if (E.state == ENG_READY) E.m.dur_ms = E.dur_ms;
     s->pic_ms = shown ? (E.shown_us - E.start_us) / 1000 : -1;
     s->state = E.state, s->picture = E.picture, s->serial = E.serial, s->geom = E.geom;
     s->lost = E.lost, s->silent = E.silent, s->frames = E.frames, s->tone = E.tone;

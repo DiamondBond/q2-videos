@@ -67,7 +67,7 @@ static void q2_show(const pix *page) {
     back = back ? 0 : PAGE_H;
 }
 
-static void q2_close(void) {
+static void q2_close(void) { /* twice does nothing more */
     if (mem && var.yoffset != first) var.yoffset = first, ioctl(fb, FBIOPAN_DISPLAY, &var);
     if (mem) munmap(mem, mem_len);
     if (fb >= 0) close(fb);

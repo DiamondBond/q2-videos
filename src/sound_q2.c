@@ -6,7 +6,9 @@
  * can take longer: so the open is retried, 2 s on the jack and 5 s elsewhere, and bluealsa, which
  * claims its PCM at set_params and not at open, is retried there while it says busy. On the jack
  * the DAC is then taken out of DSD mode and unmuted, and muted again at the close, so nothing is
- * heard until Q2 Pod powers it down.
+ * heard until Q2 Pod powers it down; the main thread mutes it too as the run ends (alsa_mute, an
+ * ioctl on the DAC's own device and none of ALSA's), for an output this thread never came back
+ * from.
  *
  * All of it is called from the engine's audio thread alone: alsa-lib 1.1.6 deadlocks in its own
  * locking (LIBASOUND_THREAD_SAFE=0, set in player_main), so no two threads may be in it. */
@@ -29,12 +31,13 @@ static snd_pcm_t *pcm;
 static int jack; /* the headphone DAC, plughw:0,0: its mute is ours while we have it */
 static snd_pcm_uframes_t buffer; /* ALSA's ring, frames */
 
+static int dac = -1; /* the DAC's own device, kept from the first open of the jack */
+
 static void dac_set(unsigned long request, int v) {
-    int fd = open(DAC, O_RDWR | O_CLOEXEC);
-    if (fd < 0) return;
-    ioctl(fd, request, &v);
-    close(fd);
+    if (dac >= 0) ioctl(dac, request, &v);
 }
+
+void alsa_mute(void) { dac_set(DAC_MUTE, 1); }
 
 int alsa_open(const char *dev, int patient, const volatile int *quit) {
     char usb[16];
@@ -58,7 +61,10 @@ int alsa_open(const char *dev, int patient, const volatile int *quit) {
         usleep(100000);
     if (err) return snd_pcm_close(pcm), pcm = 0, 0;
     if (snd_pcm_get_params(pcm, &buffer, &period)) buffer = RATE / 5;
-    if (jack) dac_set(DAC_PCM, 0), dac_set(DAC_MUTE, 0);
+    if (jack) {
+        if (dac < 0) dac = open(DAC, O_RDWR | O_CLOEXEC);
+        dac_set(DAC_PCM, 0), dac_set(DAC_MUTE, 0);
+    }
     /* Above the decoders: when the picture is too much for the Q2 it is the picture that falls
      * behind, never the sound. Under the kernel's IRQ threads (50). */
     pthread_setschedparam(pthread_self(), SCHED_FIFO,
@@ -99,5 +105,5 @@ void alsa_close(void) {
     snd_pcm_drop(pcm);
     snd_pcm_close(pcm);
     pcm = 0;
-    if (jack) dac_set(DAC_MUTE, 1);
+    if (jack) alsa_mute();
 }

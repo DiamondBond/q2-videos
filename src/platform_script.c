@@ -61,6 +61,7 @@ static int script_wait(int ms, event_t *e) {
 static void script_show(const pix *page) {}
 
 static void script_close(void) {
+    if (script) script_log("screen back"); /* the checks: every way out comes by here */
     free(script);
     script = next = 0;
 }

@@ -14,6 +14,7 @@
 #include "check.h"
 #include <fcntl.h>
 #include <libavformat/avformat.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -677,6 +678,9 @@ static void finish(pid_t pid, const char *name) {
     snprintf(path, sizeof path, "%s/log", dir);
     free(said);
     if (!(said = file_get(path, 0))) fprintf(stderr, "%s: the run left no log\n", name), abort();
+    /* however it ended, the screen was given back, once and last of all */
+    const char *back = strstr(said, "screen back\n");
+    if (!back || back[12]) fprintf(stderr, "%s: the screen was not given back\n", name), abort();
 }
 static void play(const char *name, const char *rel, const char *script, const char *more) {
     finish(begin(0, name, rel, script, more), name);
@@ -1523,6 +1527,46 @@ static void run_awake(int device) {
     NEAR(num("b", "frames"), 3000 * 48, RATE / 5), NEAR(num("b", "tone"), 880, 15);
 }
 
+/* Two recordings of forty seconds end to end in one transport stream: twice as long as its
+ * timestamps say, and every time in it twice. Its length is learned as it plays; past the
+ * length it gave a step on is a step and no end; a place in its second half is kept, and come
+ * back to. */
+static void run_spliced(void) {
+    videos("twice.ts");
+    play("spliced", "twice.ts",
+         "30000 shot a\n45000 shot b\n46000 key 223\n47000 shot c\n48000 key 222\n"
+         "49000 shot d\n49200 key 222\n50000 shot e\n50100 key 170\n",
+         0);
+    CHECK(says("ready dur=40210") && num("a", "pos") == 30000 && num("b", "pos") == 45000);
+    NEAR(num("b", "dur"), 80420, 1500), NEAR(num("b", "pic"), 44980, 60);
+    /* on ten seconds, to the keyframe after it at the latest (they are two seconds apart) */
+    CHECK(num("c", "pos") >= 56900 && num("c", "pos") <= 59200);
+    NEAR(num("c", "pic"), num("c", "pos"), 60), NEAR(num("c", "tone"), 880, 15);
+    NEAR(num("d", "pos"), num("c", "pos") - 7000, 1200);
+    NEAR(num("e", "pos"), num("d", "pos") - 8100, 1200), NEAR(num("e", "pic"), num("e", "pos"), 60);
+    mark_t k = mark_of("twice.ts");
+    CHECK(says("end twice.ts quit") && !k.flags);
+    NEAR(k.pos_ms, num("e", "pos") + 100, 20), NEAR(k.dur_ms, 80420, 1500);
+    /* again: from there, by the length the mark has, to the end */
+    play("spliced-again", "twice.ts", "1000 shot a\n", 0);
+    CHECK(num("a", "pos") >= k.pos_ms + 900 && num("a", "pos") <= k.pos_ms + 3200);
+    NEAR(num("a", "pic"), num("a", "pos"), 60), NEAR(num("a", "tone"), 880, 15);
+    CHECK(says("end twice.ts over") && mark_of("twice.ts").flags == MARK_WATCHED);
+}
+
+/* The engine's first word is not lost: a file that fails before the main thread has waited even
+ * once still wakes it. (Last of all: the pipe it leaves open is not for a run's child.) */
+static void check_wake(void) {
+    snap_t s;
+    pix *cur = 0;
+    eng_open(TMP "/no-such.mp4", 0, 0, 0, 65536, -1, -1, 0);
+    usleep(200000);
+    struct pollfd p = { wake_fd(), POLLIN, 0 };
+    CHECK(poll(&p, 1, 2000) == 1);
+    eng_poll(&s, &cur);
+    CHECK(s.state == ENG_FAILED && eng_close());
+}
+
 /* Files that aren't simple: timestamps that start above nothing, start again or run out of
  * bits, frames at uneven times, no sound, no picture, a sound that ends early, a broken end. */
 static void run_files(void) {
@@ -1543,8 +1587,10 @@ static void run_files(void) {
               says("over pos=5016")); /* and a seek goes by it too */
     }
     /* two recordings end to end, the second's timestamps starting again: one run of picture
-     * and sound through both (the place waits at the length the file gave) */
+     * and sound through both, the place going on past the length the file gave */
     play("jump", "jump.ts", "4500 shot a\n5500 shot b\n6000 shot c\n9500 shot d\n", 0);
+    CHECK(says("ready dur=5016") && num("d", "dur") > 9500 && num("d", "dur") < 10500);
+    NEAR(num("d", "pos"), 9500, 40);
     NEAR(num("b", "pic"), 5490, 60), NEAR(num("c", "pic"), 5990, 60);
     NEAR(num("d", "pic"), 9490, 60);
     NEAR(num("d", "frames"), 9500 * 48 + RATE / 5, 4096), NEAR(num("d", "tone"), 880, 15);
@@ -1739,8 +1785,10 @@ int main(int argc, char **argv) {
     run_faults();
     run_awake(0);
     run_files();
+    run_spliced();
     run_term();
     run_lock();
+    check_wake();
     puts("check_player: ok");
     return 0;
 }

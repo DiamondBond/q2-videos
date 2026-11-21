@@ -167,6 +167,10 @@ ff -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 120)" -c:v copy -c:a aac -ac 2
 # timestamps start again half way
 ff -i "$T/silent.mkv" -f lavfi -i "$(tone)" -c:v copy -c:a mp2 -ac 2 -f mpegts "$OUT/offset.ts"
 cat "$OUT/offset.ts" "$OUT/offset.ts" >"$OUT/jump.ts"
+# The same of forty seconds each: twice as long as its timestamps say, with room to seek about
+ff -t 40 -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 40)" -c:v copy -c:a mp2 -ac 2 \
+    -f mpegts "$T/part.ts"
+cat "$T/part.ts" "$T/part.ts" >"$OUT/twice.ts"
 
 # A transport stream's timestamps are 33 bits of a 90 kHz clock: this one's run out and start
 # again from nothing under three seconds in

@@ -167,17 +167,24 @@ static void say(const char *fmt, ...) {
     script_log(line);
 }
 
-/* ---- The marks ----------------------------------------------------------------------------- */
+/* ---- The card ------------------------------------------------------------------------------ */
 
+enum { SAVE_MARKS = 1, SAVE_SETTINGS = 2 };
+typedef struct {
+    int what; /* SAVE_ */
+    settings_t set;
+    marks_t marks;
+} job_t;
 static marks_t marks;
 static pthread_t saver;
-static int saving;
+static int saving, unsaved; /* unsaved: what a save left out, for the next */
 
 static void *save_main(void *arg) {
-    marks_t *m = arg;
-    marks_save(m);
-    marks_free(m);
-    free(m);
+    job_t *j = arg;
+    if (j->what & SAVE_SETTINGS) settings_save(&j->set);
+    if (j->what & SAVE_MARKS) marks_save(&j->marks);
+    marks_free(&j->marks);
+    free(j);
     return 0;
 }
 
@@ -191,33 +198,39 @@ static int save_done(int ms) {
     return !saving;
 }
 
-/* The marks to the card, by a thread of their own from a copy: the card's sync takes a moment
- * the picture hasn't got. One at a time: when the last is still at the card 300 ms on this one
- * is left out, as the last has nearly the same place, or the card is stuck and this would be. */
-static void save(void) {
-    marks_t *c = save_done(300) ? malloc(sizeof *c) : 0;
-    if (!c) return;
-    *c = marks;
-    for (int i = 0; i < c->n; ++i)
-        if (!(c->v[i].rel = strdup(marks.v[i].rel))) { /* no memory: the file stays as it is */
-            c->n = i;
-            marks_free(c);
-            free(c);
-            return;
-        }
-    saving = !pthread_create(&saver, 0, save_main, c);
-    if (!saving) save_main(c);
+/* The marks or the settings to the card, by a thread of their own from a copy: the card's sync
+ * takes a moment the picture hasn't got. One at a time: when the last is still at the card wait
+ * ms on, this one is left for the next to take along (the last has nearly the same place, or
+ * the card is stuck and this would be). */
+static void save(int what, int wait) {
+    unsaved |= what;
+    job_t *j = save_done(wait) ? calloc(1, sizeof *j) : 0;
+    if (!j) return;
+    j->what = unsaved, j->set = P.set;
+    if (unsaved & SAVE_MARKS) {
+        j->marks = marks;
+        for (int i = 0; i < marks.n; ++i)
+            if (!(j->marks.v[i].rel = strdup(marks.v[i].rel))) { /* no memory: the file stays */
+                j->marks.n = i;
+                marks_free(&j->marks);
+                free(j);
+                return;
+            }
+    }
+    unsaved = 0;
+    saving = !pthread_create(&saver, 0, save_main, j);
+    if (!saving) save_main(j);
 }
 
 /* The video's mark as it stands, to the card: watched at its end, else the place. */
-static void place_save(long long now) {
+static void place_save(long long now, int wait) {
     V.saved_at = now;
     if (!V.mark) return;
     if (V.end == END_OVER)
         V.mark->flags |= MARK_WATCHED, V.mark->pos_ms = 0;
     else
         mark_place(V.mark, V.at_ms, V.m->dur_ms);
-    save();
+    save(SAVE_MARKS, wait);
     say("save pos=%lld watched=%u", V.mark->pos_ms, V.mark->flags & MARK_WATCHED);
 }
 
@@ -309,7 +322,7 @@ static void pause_set(int on, long long now) {
     V.paused = on;
     eng_pause(on);
     V.controls_until = now + CONTROLS_MS;
-    if (on) place_save(now);
+    if (on) place_save(now, 300);
 }
 
 /* The volume file, whole: a level for Q2 Pod to set, or "?" to be told it. */
@@ -406,7 +419,7 @@ static void menu_choose(long long now) {
             break;
         case ROW_FIT:
             P.set.fill = !P.set.fill;
-            settings_save(&P.set);
+            save(SAVE_SETTINGS, 0);
             eng_fill(P.set.fill);
             /* paused, no new picture comes to take the shape: the one on show is decoded again */
             if (V.paused && V.s.pic_ms >= 0) eng_seek(V.at_ms = V.s.pic_ms, SEEK_EXACT);
@@ -612,7 +625,7 @@ static void timers(long long now) {
     if (V.paused && !P.dim && now - V.input_at >= DIM_MS)
         P.dim = 1, close(open(P.dim_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0644));
     if (V.paused && now - V.input_at >= IDLE_MS) V.end = END_QUIT;
-    if (V.state == ENG_READY && !V.paused && now - V.saved_at >= SAVE_MS) place_save(now);
+    if (V.state == ENG_READY && !V.paused && now - V.saved_at >= SAVE_MS) place_save(now, 300);
     if (V.error_until && now >= V.error_until) V.end = END_QUIT;
 }
 
@@ -633,6 +646,9 @@ static int wait_ms(long long now) {
         V.down[K_FWD] ? V.down[K_FWD] + 500 + 250 * V.repeats : 0,
         V.paused ? V.input_at + (P.dim ? IDLE_MS : DIM_MS) : 0,
         V.state == ENG_READY && !V.paused ? V.saved_at + SAVE_MS : 0,
+        /* while it plays, a look at the engine each second at least: an output that takes no
+         * more sound is noticed there (eng_poll), whatever else is or isn't due */
+        V.state == ENG_READY && !V.paused ? now + 1000 : 0,
         V.state == ENG_READY && !V.paused && V.s.due_ms >= 0 ? now + V.s.due_ms : 0,
         /* the lines change, and the time the controls say */
         V.state == ENG_READY && !V.paused && V.sub_next >= 0 ? now + V.sub_next - V.s.pos_ms + 1
@@ -696,15 +712,17 @@ static void frame(long long now, int force) {
         for (char *c = text; *c; ++c)
             if (*c == '\n') *c = '|';
         script_shot(V.shot, out);
-        say("shot=%s t=%lld state=%d pos=%lld pic=%lld paused=%d controls=%d seek=%d volume=%d "
+        say("shot=%s t=%lld state=%d pos=%lld dur=%lld pic=%lld paused=%d controls=%d seek=%d "
+            "volume=%d "
             "told=%d menu=%d sel=%d "
             "sub=%d audio=%d fill=%d geom=%d,%d,%d,%d frames=%lld tone=%d level=%d lost=%d "
             "silent=%d dim=%d badge=%d "
             "serial=%d gain=%d queued=%lld notice=%s| text=%s",
-            V.shot, now, V.state, o.pos_ms, V.s.pic_ms, V.paused, o.controls, o.knob, o.volume,
-            P.told, V.level, V.menu.sel, V.sub, V.audio, P.set.fill, V.s.geom.vx, V.s.geom.vy,
-            V.s.geom.vw, V.s.geom.vh, V.s.frames, V.s.tone, V.s.level, V.s.lost, V.s.silent, P.dim,
-            o.badge, V.s.serial, P.gain, V.s.queued, o.notice ? o.notice : "", text);
+            V.shot, now, V.state, o.pos_ms, o.dur_ms, V.s.pic_ms, V.paused, o.controls, o.knob,
+            o.volume, P.told, V.level, V.menu.sel, V.sub, V.audio, P.set.fill, V.s.geom.vx,
+            V.s.geom.vy, V.s.geom.vw, V.s.geom.vh, V.s.frames, V.s.tone, V.s.level, V.s.lost,
+            V.s.silent, P.dim, o.badge, V.s.serial, P.gain, V.s.queued, o.notice ? o.notice : "",
+            text);
         V.shot = 0;
     }
 }
@@ -735,6 +753,20 @@ static void let_go(void) {
             P.held |= 1u << k;
         }
     }
+}
+
+/* Every way out: the panel no longer dimmed, the headphone DAC muted as Q2 Pod's own player
+ * leaves it (the audio thread does that when it closes its output, but one left hanging in the
+ * output never will), and the screen given back. At exit() too, for the ways out that are not
+ * the end of player_main. */
+static void leave(void) {
+    static int left;
+    if (left++) return;
+    if (P.dim) unlink(P.dim_path);
+#ifndef HOST
+    alsa_mute();
+#endif
+    P.plat->close();
 }
 
 static void *lock_main(void *unused) {
@@ -780,7 +812,7 @@ static int play(const char *rel) {
         V.own = sub < 0;
         V.want = sub > 0 ? sub - 1 : sub < 0 && P.set.subs ? 0 : -1;
         V.state = ENG_OPENING, V.why = 0; /* the engine's to say */
-        eng_open(V.path, V.start_ms, P.device, P.gain, k ? k->audio : -1,
+        eng_open(V.path, V.start_ms, k ? k->dur_ms : 0, P.device, P.gain, k ? k->audio : -1,
                  V.want >= V.nside ? V.want - V.nside : -1, P.set.fill);
     }
     frame(now, 1);
@@ -792,7 +824,9 @@ static int play(const char *rel) {
             V.end = END_QUIT;
             break;
         }
-        if (got) input(&e, now);
+        /* all that wait, not one a pass: Q2 Pod's socket holds about ten, and a release that
+         * found it full while this thread drew would be lost */
+        for (int n = 0; got && n < 32; ++n, got = P.plat->wait(0, &e)) input(&e, now);
         timers(now);
         if (V.state != ENG_FAILED) {
             eng_poll(&V.s, &P.cur);
@@ -815,9 +849,12 @@ static int play(const char *rel) {
             subs_now(V.s.pos_ms);
             if (V.s.ended) V.end = END_OVER;
         }
-        frame(now, got && e.kind == 's');
+        frame(now, V.shot != 0);
     }
-    if (V.state == ENG_READY) place_save(now);
+    /* the last save waits for one still at the card, so a video's end is never the one left
+     * out; the sound stops first. Not that long when Q2 Pod is ending the run: it kills what
+     * is still here three seconds on. */
+    if (V.state == ENG_READY) eng_pause(1), place_save(now, term ? 300 : 1200);
     say("end %s %s pos=%lld", rel, V.end == END_OVER ? "over" : term ? "term" : "quit", V.at_ms);
     P.stuck = !eng_close();
     return V.end;
@@ -844,6 +881,7 @@ int player_main(int argc, char **argv) {
 #else
     P.plat = getenv("VIDEOS_SCRIPT") ? &plat_script : &plat_q2;
 #endif
+    wake_fd(); /* before a signal could have something to say */
     struct sigaction sa = { .sa_handler = on_term, .sa_flags = SA_RESTART };
     sigaction(SIGTERM, &sa, 0), sigaction(SIGINT, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
@@ -857,6 +895,7 @@ int player_main(int argc, char **argv) {
                 P.plat == &plat_script ? ", and no script in $VIDEOS_SCRIPT" : "");
         return 0;
     }
+    atexit(leave);
     settings_load(&P.set);
     marks_load(&marks);
     pop_read(&P.pop, getenv("Q2_POPUP"));
@@ -883,9 +922,9 @@ int player_main(int argc, char **argv) {
     while (play(next) == END_OVER && !P.stuck && !term && P.set.next &&
            lib_next(P.root, V.rel, P.set.sort, next, sizeof next)) {}
     if (!P.stuck) let_go();
-    save_done(1200); /* the place reaches the card before the screen is given back */
-    if (P.dim) unlink(P.dim_path);
-    P.plat->close();
+    if (unsaved) save(0, 1200); /* a setting no save has taken along */
+    save_done(1200);            /* the place reaches the card before the screen is given back */
+    leave();
     if (P.stuck || !save_done(0)) _exit(0); /* a thread is still in the card's or ALSA's hands */
     cues_free(&V.cues);
     marks_free(&marks);
