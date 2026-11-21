@@ -88,6 +88,15 @@ ff -i "$OUT/two-audio-subs.mkv" -i "$T/twelve" -map 0 -map_metadata 1 -map_chapt
 # one byte each) and SubRip's tags; sidecar-bom.srt is all UTF-8, a BOM first, CRLF line ends.
 x264 sidecar "$(pic 640x360 25 10)"
 ff -i "$T/sidecar.mkv" -f lavfi -i "$(tone 440 48000 10)" -c:v copy -c:a aac -ac 2 "$OUT/sidecar.mp4"
+# The same with subtitles that are pictures (a Blu-ray's): three empty segments of them are a
+# track all the same, and one the player can't draw
+{
+    printf 'PG\000\001\137\220\000\000\000\000\200\000\000'
+    printf 'PG\000\002\277\040\000\000\000\000\200\000\000'
+    printf 'PG\000\004\036\260\000\000\000\000\200\000\000'
+} >"$T/pictures.sup"
+ff -i "$OUT/sidecar.mp4" -i "$T/pictures.sup" -map 0 -map 1 -c copy -metadata:s:s:0 language=eng \
+    "$OUT/pictures.mkv"
 printf '1\n00:00:01,000 --> 00:00:03,000\nFirst line\nSecond line\n\n' >"$OUT/sidecar.srt"
 printf '2\n00:00:04,000 --> 00:00:06,000\n<i>Привет</i>, мир\n\n' >>"$OUT/sidecar.srt"
 printf '3\n00:00:07,000 --> 00:00:09,000\nCaf\351 d\351j\340 vu\n' >>"$OUT/sidecar.srt"

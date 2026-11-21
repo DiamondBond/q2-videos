@@ -1,5 +1,5 @@
 /* What is drawn over the picture: the controls, the volume, subtitles, the menu, and the whole
- * screens (loading, a video that can't be played). Flat: black bands at about 55% and white
+ * screens (loading, a video that can't be played). Flat: black bands at about 75% and white
  * text; the menu is Q2 Pod's own pop-up, in the colours it hands a card app in $Q2_POPUP. */
 #include "player.h"
 #include <stdio.h>
@@ -7,7 +7,8 @@
 #include <string.h>
 
 #define WHITE 0xffffff
-#define BAND 140 /* a band's black over the picture, of 255 */
+#define BAND 190    /* a band's black over the picture, of 255: white text reads on a white one */
+#define TITLE_W 249 /* the title's room, between the battery and the dots */
 #define TOP_H 44
 #define BOTTOM_Y 266
 #define BAR_X 21 /* the bar, as Now Playing's: where the glass's corners let it start */
@@ -78,8 +79,9 @@ int menu_hit(const pop_t *p, const menu_t *m, int x, int y) {
     return row < 0 || row >= m->n || row >= m->top + MENU_SHOWN || m->row[row].off ? -1 : row;
 }
 
-/* Minimal's text is capitals, 2 px apart (Q2 Pod's SUDO_TRACK): ASCII's letters raised, as
- * Q2 Pod's own rows are; any other script stays as it is. */
+/* Minimal's own words are capitals, 2 px apart (Q2 Pod's SUDO_TRACK): ASCII's letters raised,
+ * as Q2 Pod's own rows are; any other script stays as it is. A name from the file (a chapter's,
+ * a track's) is drawn as it is written. */
 static const char *styled(const pop_t *p, const char *s, char *buf, size_t n) {
     if (p->style != POP_MINIMAL) return s;
     snprintf(buf, n, "%s", s);
@@ -122,20 +124,21 @@ static void menu_draw(pix *page, const pop_t *p, const menu_t *m) {
         int ry = y + top + i * POP_ROW, on = m->top + i == m->sel;
         pix ink = on ? p->pick_text : p->text;
         int alpha = r->off ? 110 : 255, vw = 0;
+        int lt = r->named & 1 ? 0 : track, vt = r->named & 2 ? 0 : track;
         if (on && p->style == POP_MODERN)
             rbox(page, x + 10, ry + 1, POP_W - 20, POP_ROW - 2, 6, p->pick, 255, 0);
         if (on && minimal) rbox(page, x + 24, ry + (POP_ROW - 6) / 2, 6, 6, 3, p->pick, 255, 0);
         if (*r->value) { /* at the right, smaller, and never more than half the row */
-            const char *v = text_fit(styled(p, r->value, buf, sizeof buf), small, track,
-                                     (POP_W - left - right) / 2, fit, sizeof fit);
-            vw = text_w(v, small, track);
-            text_at(page, x + POP_W - right - vw, ry + (POP_ROW - small) / 2, v, small, track, ink,
+            const char *v = text_fit(vt ? styled(p, r->value, buf, sizeof buf) : r->value, small,
+                                     vt, (POP_W - left - right) / 2, fit, sizeof fit);
+            vw = text_w(v, small, vt);
+            text_at(page, x + POP_W - right - vw, ry + (POP_ROW - small) / 2, v, small, vt, ink,
                     on ? alpha : alpha * 3 / 4);
             vw += 10;
         }
-        const char *label = text_fit(styled(p, r->label, buf, sizeof buf), px, track,
+        const char *label = text_fit(lt ? styled(p, r->label, buf, sizeof buf) : r->label, px, lt,
                                      POP_W - left - right - vw, fit, sizeof fit);
-        text_at(page, x + left, ry + (POP_ROW - px) / 2, label, px, track, ink, alpha);
+        text_at(page, x + left, ry + (POP_ROW - px) / 2, label, px, lt, ink, alpha);
     }
     if (m->n > shown) { /* more than fit: where in the list the rows shown are */
         int room = shown * POP_ROW - 8, len = room * shown / m->n,
@@ -235,10 +238,11 @@ long long bar_ms(int x, long long dur_ms) {
     return dur_ms * x / BAR_W;
 }
 
-/* A bar from x, w wide, filled to part of whole. */
+/* A bar from x, w wide, filled to part of whole; the rest of it white at 90 of 255, a grey that
+ * shows on a bright picture's band as on a black one. */
 static void bar(pix *page, int x, int w, long long part, long long whole) {
     int to = whole > 0 ? (int)(w * (part < 0 ? 0 : part > whole ? whole : part) / whole) : 0;
-    rbox(page, x, BAR_Y, w, BAR_H, 3, 0x5a5a5a, 255, 0);
+    rbox(page, x, BAR_Y, w, BAR_H, 3, WHITE, 90, 0);
     if (to >= 2) rbox(page, x, BAR_Y, to < BAR_H ? BAR_H : to, BAR_H, 3, WHITE, 255, 0);
 }
 
@@ -285,10 +289,19 @@ void osd_draw(pix *page, const osd_t *o) {
     }
     if (o->controls) {
         fill(page, 0, 0, VIEW_W, TOP_H, 0x000000, BAND);
-        /* the title between the corners, and clear of the dots at its right */
-        int room = VIEW_W - 2 * 72;
-        centred(page, 15, o->title, 18, room, WHITE);
+        /* the title between the battery and the dots: a size smaller before it is cut */
+        int tpx = text_w(o->title, 18, 0) > TITLE_W ? 16 : 18;
+        centred(page, 15 + (18 - tpx) / 2, o->title, tpx, TITLE_W, WHITE);
         for (int i = 0; i < 3; ++i) disc(page, 324.5f + (float)i * 7, 24.5f, 2.5f, WHITE, 255);
+        if (o->battery >= 0) { /* flat, 22 x 11: its outline, its nub, the charge inside */
+            int x = 31, y = 19, w = 16 * o->battery / 100;
+            if (o->battery && w < 2) w = 2; /* what is left is seen */
+            pix ink = o->charging ? 0x34c759 : o->battery <= 15 ? 0xff3b30 : WHITE;
+            fill(page, x, y, 20, 1, WHITE, 255), fill(page, x, y + 10, 20, 1, WHITE, 255);
+            fill(page, x, y + 1, 1, 9, WHITE, 255), fill(page, x + 19, y + 1, 1, 9, WHITE, 255);
+            fill(page, x + 20, y + 3, 2, 5, WHITE, 255);
+            fill(page, x + 2, y + 2, w, 7, ink, 255);
+        }
     }
     if (band) fill(page, 0, BOTTOM_Y, VIEW_W, VIEW_H - BOTTOM_Y, 0x000000, BAND);
     if (o->volume >= 0) { /* a speaker, and the bar filled to the level */
@@ -300,8 +313,8 @@ void osd_draw(pix *page, const osd_t *o) {
         bar(page, 72, 257, o->volume, 100);
     } else if (o->controls) {
         bar(page, BAR_X, BAR_W, o->pos_ms, o->dur_ms);
-        for (int i = 1; i < o->nchapters && o->dur_ms > 0;
-             ++i) { /* a gap where each chapter begins */
+        /* a gap where each chapter begins: not of so many that the bar would be gaps */
+        for (int i = 1; i < o->nchapters && o->nchapters <= 24 && o->dur_ms > 0; ++i) {
             long long at = o->chapter[i];
             if (at > 0 && at < o->dur_ms)
                 fill(page, BAR_X + (int)(BAR_W * at / o->dur_ms), BAR_Y, 2, BAR_H, 0x000000, 255);

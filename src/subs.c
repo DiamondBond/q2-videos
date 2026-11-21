@@ -225,7 +225,7 @@ const char *lang_name(const char *code) {
 /* the file with the video's own name first: it is the one shown by default */
 static int by_path(const void *a, const void *b) {
     const sidecar_t *x = a, *y = b;
-    int own = !strcmp(y->name, "External") - !strcmp(x->name, "External");
+    int own = !*y->name - !*x->name;
     return own ? own : natcmp(x->path, y->path);
 }
 
@@ -252,7 +252,8 @@ int sidecars(const char *path, sidecar_t *out, int max) {
         if (snprintf(out[n].path, PATH_N, "%s/%s", dir, e->d_name) >= PATH_N) continue;
         char lang[40];
         snprintf(lang, sizeof lang, "%.*s", wlen ? (int)wlen - 1 : 0, word + 1);
-        snprintf(out[n].name, sizeof out[n].name, "%s", wlen ? lang_name(lang) : "External");
+        snprintf(out[n].name, sizeof out[n].name, "%s", wlen ? lang_name(lang) : "");
+        if (out[n].name[0] >= 'a' && out[n].name[0] <= 'z') out[n].name[0] -= 32; /* Commentary */
         ++n;
     }
     if (d) closedir(d);

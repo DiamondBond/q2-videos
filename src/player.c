@@ -43,6 +43,11 @@
 #define HOLD_MAX 30000    /* a side button down this long has lost its release */
 #define LET_GO_MS 2000    /* at the end, what is down is waited for this long */
 #define LET_GO_TERM 300   /* and this long when Q2 Pod ends the run */
+#define BATTERY_MS 30000  /* the battery is read again this often while the controls show */
+/* The Q2's fuel gauge (a number) and the kernel's word on charging; the checks' are files of
+ * their own, $VIDEOS_BATTERY and $VIDEOS_CHARGE. */
+#define GAUGE "/sys/devices/i2c-0/0-0062/cw2015_capacity"
+#define CHARGE "/sys/class/power_supply/battery/status"
 /* ponytail: of more subtitle files beside a video than this, the first the folder lists */
 #define SIDES 8
 
@@ -78,6 +83,19 @@ void mark_place(mark_t *k, long long pos_ms, long long dur_ms) {
         k->pos_ms = pos_ms, k->flags &= ~MARK_WATCHED;
 }
 
+int battery_level(const char *text) {
+    int i = 0, v = 0, digits = 0;
+    while (i < 32 && text[i] && (text[i] < '0' || text[i] > '9')) ++i;
+    for (; i < 32 && text[i] >= '0' && text[i] <= '9' && digits < 4; ++i, ++digits)
+        v = v * 10 + text[i] - '0';
+    return digits && v <= 100 ? v : -1;
+}
+
+int battery_charging(const char *text) {
+    size_t n = strcspn(text, " \t\r\n");
+    return (n == 8 && !strncmp(text, "Charging", n)) || (n == 4 && !strncmp(text, "Full", n));
+}
+
 int event_parse(const char *msg, event_t *e) {
     memset(e, 0, sizeof *e);
     if (sscanf(msg, "k %c %d", &e->what, &e->a) == 2 && (e->what == 'd' || e->what == 'u'))
@@ -108,6 +126,8 @@ static struct { /* the run's */
     int volume, told;   /* the Q2's volume as shown, and as Q2 Pod last said it; -1 not yet */
     long long asked_at; /* when a level was last asked for; 0 once Q2 Pod's word is taken */
     int dim, stuck;
+    int battery, charging; /* for the top band: the charge, -1 not known; read at battery_at */
+    long long battery_at;
     unsigned held;   /* what went down here and has not come up: a bit a K_, and FINGER */
     pix *cur, *page; /* the picture on show, and the frame drawn over a copy of it */
     const pix *out;  /* which of them the screen has */
@@ -242,8 +262,19 @@ static void place_save(long long now, int wait) {
 
 /* ---- Subtitles ----------------------------------------------------------------------------- */
 
+/* 1 when the nth subtitles have a name from the file: a language, a word of its name, a title. */
+static int sub_named(int n) { return n >= V.nside || (n >= 0 && *V.side[n].name); }
+
+/* What they are called: that name; a file beside the video without one is On when there is
+ * nothing else to choose, else its place in the list. */
 static const char *sub_name(int n) {
-    return n < 0 ? "Off" : n < V.nside ? V.side[n].name : V.m->subs[n - V.nside].name;
+    static char track[24];
+    if (n < 0) return "Off";
+    if (n >= V.nside) return V.m->subs[n - V.nside].name;
+    if (*V.side[n].name) return V.side[n].name;
+    if (V.nside + V.m->nsubs == 1) return "On";
+    snprintf(track, sizeof track, "Track %d", n + 1);
+    return track;
 }
 
 /* The subtitles on: the nth of the list, or none for -1 and for one that can't be shown. */
@@ -380,11 +411,11 @@ static void volume_told(const event_t *e, long long now) {
 
 /* ---- The menu ------------------------------------------------------------------------------ */
 
-static void row(const char *label, const char *value, int off) {
+static void row(const char *label, const char *value, int off, int named) {
     row_t *r = &V.menu.row[V.menu.n++];
     snprintf(r->label, sizeof r->label, "%s", label);
     snprintf(r->value, sizeof r->value, "%s", value);
-    r->off = off;
+    r->off = off, r->named = named;
 }
 
 static void menu_open(int level, int sel) {
@@ -395,32 +426,40 @@ static void menu_open(int level, int sel) {
     switch (level) {
     case MENU_OPTIONS: /* only the rows that apply */
         V.menu.title = "Options";
-        if (m->naudio > 1) V.act[V.menu.n] = ROW_AUDIO, row("Audio", m->audio[V.audio].name, 0);
-        if (V.nside + m->nsubs) V.act[V.menu.n] = ROW_SUBS, row("Subtitles", sub_name(V.sub), 0);
-        if (m->video) V.act[V.menu.n] = ROW_FIT, row("Fit to Screen", P.set.fill ? "On" : "Off", 0);
-        if (m->nchapters) V.act[V.menu.n] = ROW_CHAPTERS, row("Chapters", "", 0);
-        V.act[V.menu.n] = ROW_START, row("Start Over", "", 0);
+        if (m->naudio > 1) V.act[V.menu.n] = ROW_AUDIO, row("Audio", m->audio[V.audio].name, 0, 2);
+        if (V.nside + m->nsubs)
+            V.act[V.menu.n] = ROW_SUBS,
+            row("Subtitles", sub_name(V.sub), 0, sub_named(V.sub) ? 2 : 0);
+        if (m->video)
+            V.act[V.menu.n] = ROW_FIT, row("Fit to Screen", P.set.fill ? "On" : "Off", 0, 0);
+        if (m->nchapters) V.act[V.menu.n] = ROW_CHAPTERS, row("Chapters", "", 0, 0);
+        V.act[V.menu.n] = ROW_START, row("Start Over", "", 0, 0);
         for (int i = 0; i < V.menu.n; ++i)
             if (V.act[i] == sel) V.menu.sel = i;
         break;
     case MENU_AUDIO:
         V.menu.title = "Audio";
         for (int i = 0; i < m->naudio; ++i)
-            row(m->audio[i].name, i == V.audio ? "\xe2\x9c\x93" : "", 0);
+            row(m->audio[i].name, i == V.audio ? "\xe2\x9c\x93" : "", 0, 1);
         V.menu.sel = V.audio;
         break;
     case MENU_SUBS:
         V.menu.title = "Subtitles";
-        row("Off", V.sub < 0 ? "\xe2\x9c\x93" : "", 0);
-        for (int i = 0; i < V.nside + m->nsubs; ++i)
-            row(sub_name(i), i == V.sub ? "\xe2\x9c\x93" : "",
-                i >= V.nside && !m->subs[i - V.nside].ok);
+        row("Off", V.sub < 0 ? "\xe2\x9c\x93" : "", 0, 0);
+        for (int i = 0; i < V.nside + m->nsubs; ++i) { /* pictures of text can't be shown */
+            int off = i >= V.nside && !m->subs[i - V.nside].ok;
+            row(sub_name(i),
+                off          ? "Unavailable"
+                : i == V.sub ? "\xe2\x9c\x93"
+                             : "",
+                off, sub_named(i));
+        }
         V.menu.sel = V.sub + 1;
         break;
     case MENU_CHAPTERS:
         V.menu.title = "Chapters";
         for (int i = 0; i < m->nchapters; ++i) {
-            row(m->chapter[i].title, time_text(m->chapter[i].start_ms, time, sizeof time), 0);
+            row(m->chapter[i].title, time_text(m->chapter[i].start_ms, time, sizeof time), 0, 1);
             if (m->chapter[i].start_ms <= V.at_ms) V.menu.sel = i;
         }
         break;
@@ -704,6 +743,7 @@ static int wait_ms(long long now) {
                                                              : 0,
         V.state == ENG_READY && !V.paused && controls_shown(now) ? now + 1000 - V.s.pos_ms % 1000
                                                                  : 0,
+        V.state == ENG_READY && controls_shown(now) ? P.battery_at + BATTERY_MS : 0,
     };
     for (size_t i = 0; i < sizeof due / sizeof *due; ++i)
         if (due[i] > now && due[i] < at) at = due[i]; /* what is past was seen to this pass */
@@ -712,10 +752,21 @@ static int wait_ms(long long now) {
 
 /* ---- The frame ----------------------------------------------------------------------------- */
 
+static void battery_read(long long now) {
+    const char *gauge = getenv("VIDEOS_BATTERY"), *charge = getenv("VIDEOS_CHARGE");
+    char *level = file_get(gauge && *gauge ? gauge : GAUGE, 0),
+         *status = file_get(charge && *charge ? charge : CHARGE, 0);
+    P.battery = level ? battery_level(level) : -1;
+    P.charging = status && battery_charging(status);
+    P.battery_at = now;
+    free(level), free(status);
+}
+
 static void frame(long long now, int force) {
     static struct {
-        int v[20];
+        int v[22];
     } drawn;
+    static int had; /* the controls were up at the last frame */
     static long long chapter[CHAPTERS];
     int ready = V.state == ENG_READY, seeking = ready && (now < V.seek_until || V.drag);
     /* before the first picture; a video whose picture never comes plays as sound alone */
@@ -729,6 +780,9 @@ static void frame(long long now, int force) {
     o.pos_ms = V.pend_ms >= 0 ? V.pend_ms : V.at_ms, o.dur_ms = ready ? V.m->dur_ms : 0;
     o.controls = ready && !loading && controls_shown(now), o.knob = seeking,
     o.paused = ready && V.paused;
+    /* the battery, read as the controls come up and now and then while they stay */
+    if (o.controls && (!had || now - P.battery_at >= BATTERY_MS)) battery_read(now);
+    had = o.controls, o.battery = P.battery, o.charging = P.charging;
     o.target = seeking && now < V.target_until;
     o.disc = o.paused && now < V.disc_until && !V.level && !o.target;
     if (ready)
@@ -750,13 +804,28 @@ static void frame(long long now, int force) {
         o.message = "Loading\xe2\x80\xa6";
 
     /* drawn again for a new picture, or when what is over it differs */
-    const int sig[20] = { o.controls,    o.knob,     o.paused,
-                          o.volume,      o.badge,    o.controls ? (int)(o.pos_ms / 1000) : 0,
-                          V.level,       V.menu.sel, V.menu.top,
-                          o.notice != 0, o.plain,    V.state,
-                          loading,       V.rev,      V.s.lost,
-                          P.set.subsize, P.dim,      o.controls ? (int)(o.dur_ms / 1000) : 0,
-                          o.disc,        o.target };
+    const int sig[22] = { o.controls,
+                          o.knob,
+                          o.paused,
+                          o.volume,
+                          o.badge,
+                          o.controls ? (int)(o.pos_ms / 1000) : 0,
+                          V.level,
+                          V.menu.sel,
+                          V.menu.top,
+                          o.notice != 0,
+                          o.plain,
+                          V.state,
+                          loading,
+                          V.rev,
+                          V.s.lost,
+                          P.set.subsize,
+                          P.dim,
+                          o.controls ? (int)(o.dur_ms / 1000) : 0,
+                          o.disc,
+                          o.target,
+                          o.controls ? o.battery : 0,
+                          o.controls && o.charging };
     if (!V.s.fresh && !force && !memcmp(sig, drawn.v, sizeof sig)) return;
     memcpy(drawn.v, sig, sizeof sig);
     const pix *out = P.cur;
@@ -767,7 +836,10 @@ static void frame(long long now, int force) {
     }
     P.plat->show(P.out = out);
     if (V.shot) {
-        char text[sizeof V.subtext];
+        char text[sizeof V.subtext], rows[400] = "";
+        for (int i = V.menu.top; o.menu && i < V.menu.n && i < V.menu.top + MENU_SHOWN; ++i)
+            snprintf(rows + strlen(rows), sizeof rows - strlen(rows), "%s%s:%s", *rows ? ";" : "",
+                     V.menu.row[i].label, V.menu.row[i].value);
         snprintf(text, sizeof text, "%s", V.subtext);
         for (char *c = text; *c; ++c)
             if (*c == '\n') *c = '|';
@@ -777,12 +849,12 @@ static void frame(long long now, int force) {
             "told=%d menu=%d sel=%d "
             "sub=%d audio=%d fill=%d geom=%d,%d,%d,%d frames=%lld tone=%d level=%d lost=%d "
             "silent=%d dim=%d badge=%d disc=%d target=%d "
-            "serial=%d gain=%d queued=%lld notice=%s| text=%s",
+            "serial=%d gain=%d queued=%lld battery=%d rows=%s| notice=%s| text=%s",
             V.shot, now, V.state, o.pos_ms, o.dur_ms, V.s.pic_ms, V.paused, o.controls, o.knob,
             o.volume, P.told, V.level, V.menu.sel, V.sub, V.audio, P.set.fill, V.s.geom.vx,
             V.s.geom.vy, V.s.geom.vw, V.s.geom.vh, V.s.frames, V.s.tone, V.s.level, V.s.lost,
             V.s.silent, P.dim, o.badge, o.disc, o.target, V.s.serial, P.gain, V.s.queued,
-            o.notice ? o.notice : "", text);
+            o.controls ? o.battery : -1, rows, o.notice ? o.notice : "", text);
         V.shot = 0;
     }
 }
@@ -972,7 +1044,7 @@ int player_main(int argc, char **argv) {
      * until it has, the level is that argument's, and without one the wheel waits. */
     P.device = P.plat == &plat_script ? 0 : argc > 1 ? argv[1] : 0;
     P.gain = arg_gain(argc > 2 ? argv[2] : 0);
-    P.volume = arg_level(argc > 2 ? argv[2] : 0), P.told = -1;
+    P.volume = arg_level(argc > 2 ? argv[2] : 0), P.told = -1, P.battery = -1;
     volume_ask("?");
     if (P.plat == &plat_script)
         eng_test((unsigned)atoi(getenv("VIDEOS_MEM_KB") ? getenv("VIDEOS_MEM_KB") : "0"),

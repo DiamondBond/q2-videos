@@ -383,23 +383,28 @@ static int fail(const char *fmt, ...) {
 }
 
 /* "AV1", "DTS": a codec as the screen names it */
+/* A codec as it is called: the common ones by their names, any other libavcodec's in capitals. */
 static const char *codec_name(enum AVCodecID id, char *out, size_t n) {
+    static const char *const known[][2] = { { "h264", "H.264" },         { "hevc", "H.265" },
+                                            { "mpeg4", "MPEG-4" },       { "ac3", "AC-3" },
+                                            { "msmpeg4v3", "MS-MPEG4" }, { "eac3", "E-AC-3" } };
+    for (size_t i = 0; i < sizeof known / sizeof *known; ++i)
+        if (!strcmp(avcodec_get_name(id), known[i][0])) return known[i][1];
     snprintf(out, n, "%s", avcodec_get_name(id));
     for (char *p = out; *p; ++p)
         if (*p >= 'a' && *p <= 'z') *p -= 32;
     return out;
 }
 
-static void track_name(const AVStream *st, int nth, const char *more, char *out, size_t n) {
+static void track_name(const AVStream *st, int nth, char *out, size_t n) {
     const AVDictionaryEntry *title = av_dict_get(st->metadata, "title", 0, 0),
                             *lang = av_dict_get(st->metadata, "language", 0, 0);
     char number[24];
     snprintf(number, sizeof number, "Track %d", nth + 1);
-    snprintf(out, n, "%s%s",
+    snprintf(out, n, "%s",
              title && *title->value                               ? title->value
              : lang && *lang->value && strcmp(lang->value, "und") ? lang_name(lang->value)
-                                                                  : number,
-             more);
+                                                                  : number);
 }
 
 /* The file opened and looked into: 1 when it can be played, else E.why says why not. */
@@ -409,10 +414,10 @@ static int media_open(void) {
     AVFormatContext *ic = input_open(E.path, interrupted, 0, &err); /* ends when we do */
     if (!ic) /* nothing FFmpeg knows, or (EINVAL) something that isn't one of FORMATS */
         return fail(err == AVERROR_INVALIDDATA || err == AVERROR(EINVAL)
-                        ? "It is not a video file the Q2 knows."
+                        ? "The file is damaged or isn't a video."
                         : "The file can't be read.");
     E.ic = ic;
-    if (avformat_find_stream_info(ic, 0) < 0) return fail("The Q2 can't tell what is in the file.");
+    if (avformat_find_stream_info(ic, 0) < 0) return fail("The file is damaged or isn't a video.");
     E.start_us = ic->start_time != AV_NOPTS_VALUE ? ic->start_time : 0;
     /* A transport stream's timestamps may start again anywhere, so ten seconds apart is a jump
      * there; elsewhere a gap that long is a gap (a still frame, a silence), as ffplay has it. */
@@ -435,7 +440,7 @@ static int media_open(void) {
             continue;
         }
         if (E.m.naudio == TRACKS) continue;
-        track_name(st, E.m.naudio, "", E.m.audio[E.m.naudio].name, sizeof E.m.audio->name);
+        track_name(st, E.m.naudio, E.m.audio[E.m.naudio].name, sizeof E.m.audio->name);
         E.m.audio[E.m.naudio].index = (int)i, E.m.audio[E.m.naudio++].ok = 1;
     }
 
@@ -444,17 +449,17 @@ static int media_open(void) {
     if (E.vi == AVERROR_DECODER_NOT_FOUND) {
         for (unsigned i = 0; i < ic->nb_streams; ++i)
             if (ic->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
-                return fail("The Q2 has no decoder for %s video.",
+                return fail("The Q2 can't play %s video. Convert it to H.264.",
                             codec_name(ic->streams[i]->codecpar->codec_id, name, sizeof name));
     }
     if (E.vi < 0) E.vi = -1;
     if (E.vi < 0 && !E.m.naudio)
         return deaf < 0
                    ? fail("There is no picture or sound in it.")
-                   : fail("The Q2 has no decoder for %s sound.",
+                   : fail("The Q2 can't play %s sound. Convert it to AAC.",
                           codec_name(ic->streams[deaf]->codecpar->codec_id, name, sizeof name));
     if (deaf >= 0 && !E.m.naudio)
-        snprintf(E.m.note, sizeof E.m.note, "No sound: the Q2 has no decoder for %s",
+        snprintf(E.m.note, sizeof E.m.note, "No sound: the Q2 can't play %s",
                  codec_name(ic->streams[deaf]->codecpar->codec_id, name, sizeof name));
 
     if (E.vi >= 0) {
@@ -506,7 +511,7 @@ static int media_open(void) {
         t->ok =
             d && d->props & AV_CODEC_PROP_TEXT_SUB && avcodec_find_decoder(st->codecpar->codec_id);
         if (t->ok && E.m.nsubs == E.sub_nth) E.want_sub = (int)i;
-        track_name(st, E.m.nsubs++, t->ok ? "" : " (pictures)", t->name, sizeof t->name);
+        track_name(st, E.m.nsubs++, t->name, sizeof t->name);
     }
 
     for (unsigned i = 0; i < ic->nb_chapters && E.m.nchapters < CHAPTERS; ++i) {

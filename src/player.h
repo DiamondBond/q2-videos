@@ -85,8 +85,8 @@ void ass_plain(const char *event, char *out, size_t n);
 /* Plain text's tags left out in place: <i> and its like, {\...}. */
 void tags_strip(char *text);
 /* The subtitle files beside the video at path: "name.srt", then every "name.<lang>.srt" in order
- * of name, case aside; each one's path and what to call it ("English" for en or eng, the word
- * itself for any other, "External" for none). Returns how many, at most max. */
+ * of name, case aside; each one's path and what to call it ("English" for en or eng, any other
+ * word itself with a capital, "" for none). Returns how many, at most max. */
 typedef struct {
     char path[PATH_N], name[48];
 } sidecar_t;
@@ -270,7 +270,8 @@ void pop_read(pop_t *p, const char *s);
 #define MENU_SHOWN 7  /* rows on the screen at once */
 typedef struct {
     char label[64], value[48];
-    int off; /* can't be chosen */
+    int off;   /* can't be chosen */
+    int named; /* a name from the file, drawn as it is written: 1 the label, 2 the value */
 } row_t;
 typedef struct {
     const char *title;
@@ -292,6 +293,7 @@ typedef struct { /* what is drawn over the picture */
     int nchapters;
     const long long *chapter; /* their starts, ms */
     int volume;               /* the volume band: the level, -1 not shown */
+    int battery, charging;    /* the battery's charge, 0 to 100, -1 not known; and it charges */
     int badge;                /* a side button's seek so far, seconds: "+30 s", "+1:40"; 0 none */
     const char *notice;       /* a line to say, 0 none */
     const char *subs;         /* the subtitles on show, lines parted by \n; 0 none */
@@ -339,6 +341,11 @@ int hold_step(long long held_ms); /* a step's seconds: 10, and 30 once held two 
 /* The mark for a stop at pos of dur (0 unknown): watched in the last 30 s or 5% (a short video:
  * its second half), and then at the start again; the start too within 30 s of it. */
 void mark_place(mark_t *k, long long pos_ms, long long dur_ms);
+/* The fuel gauge's text as a charge: the first run of digits in its first 32 bytes, 0 to 100;
+ * -1 for anything else. */
+int battery_level(const char *text);
+/* The power supply's status as charging: its first word is "Charging" or "Full". */
+int battery_charging(const char *text);
 
 /* ---- The platform -------------------------------------------------------------------------- */
 

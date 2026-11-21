@@ -139,7 +139,7 @@ static void check_subs(void) {
        "'my film.EN.SRT' 'My Film.ja.srt' 'My Film 2.srt' 'My Film.txt' 'Other.srt' 'My "
        "Film.commentary.srt'");
     CHECK(sidecars(TMP "/side/My Film.mkv", side, 4) == 4);
-    SAME(side[0].name, "External"), SAME(side[1].name, "commentary"), SAME(side[2].name, "English");
+    SAME(side[0].name, ""), SAME(side[1].name, "Commentary"), SAME(side[2].name, "English");
     SAME(side[3].name, "Japanese");
     SAME(side[0].path, TMP "/side/My Film.srt"), SAME(side[2].path, TMP "/side/my film.EN.SRT");
     CHECK(sidecars(TMP "/side/My Film.mkv", side, 2) == 2 &&
@@ -296,6 +296,60 @@ static void check_draw(void) {
         for (int y = 0; y < VIEW_H; ++y)
             if (y < 240 || y > 264) CHECK(*view_at(page, x, y) == 0xffffffffu);
     CHECK(*view_at(page, letter, 257) != 0xffffffffu && *view_at(page, letter, 247) != 0xffffffffu);
+    /* the title has 249 px between the battery and the dots; one too wide at 18 px is drawn at
+     * 16 before it is cut */
+    const char *fits = "A Title That Is About This Long, Plus",
+               *wide = "A Title That Is About This Long and Then a Good Deal Longer";
+    CHECK(text_w(fits, 18, 0) > 249 && text_w(fits, 16, 0) <= 249 && text_w(wide, 16, 0) > 249);
+    for (int i = 0; i < 2; ++i) {
+        int left = VIEW_W, right = 0, n16 = 0, w = text_w(i ? wide : fits, 16, 0);
+        memset(page, 0, PAGE_PX * sizeof *page);
+        osd_draw(page,
+                 &(osd_t){ .volume = -1, .battery = -1, .controls = 1, .title = i ? wide : fits });
+        for (int x = 0; x < 315; ++x)
+            for (int y = 0; y < 44; ++y)
+                if (*view_at(page, x, y) != 0xff000000u) {
+                    if (x < left) left = x;
+                    if (x > right) right = x;
+                }
+        CHECK(left >= 63 && right <= 312 && right - left > 200);
+        memset(page, 0, PAGE_PX * sizeof *page);
+        text_at(page, 0, 100, fits, 16, 0, 0xffffff, 255);
+        for (int x = 0; x < VIEW_W; ++x) n16 += *view_at(page, x, 108) != 0xff000000u;
+        if (!i) CHECK(right - left >= w - 4 && right - left <= w + 1 && n16); /* all of it */
+    }
+    /* a gap in the bar where each chapter begins, of 24; none of more */
+    long long starts[30];
+    for (int i = 0; i < 30; ++i) starts[i] = i * 1000;
+    for (int n = 24; n <= 30; n += 6) {
+        int gaps = 0;
+        memset(page, 0, PAGE_PX * sizeof *page);
+        osd_draw(page, &(osd_t){ .volume = -1,
+                                 .battery = -1,
+                                 .controls = 1,
+                                 .title = "",
+                                 .dur_ms = 30000,
+                                 .nchapters = n,
+                                 .chapter = starts });
+        for (int x = 30; x < 345; ++x) gaps += *view_at(page, x, 285) == 0xff000000u;
+        CHECK(n == 24 ? gaps == 2 * 23 : !gaps);
+    }
+    /* the minimal look: capitals 2 px apart for its own words, a name from the file as written */
+    static menu_t menu;
+    pop_t minimal;
+    pop_read(&minimal, "minimal 000000 4a4a4a ffffff 8c8c8c ffffff ffffff");
+    menu.title = "Chapters", menu.n = 2, menu.sel = 1, menu.row[0].named = 1;
+    strcpy(menu.row[0].label, "The Middle"), strcpy(menu.row[1].label, "The Middle");
+    memset(page, 0, PAGE_PX * sizeof *page);
+    osd_draw(page, &(osd_t){ .volume = -1, .battery = -1, .pop = &minimal, .menu = &menu });
+    int ends[2] = { 0, 0 };
+    for (int r = 0; r < 2; ++r) /* the rows are 32 px from y 143; their text from x 87 */
+        for (int x = 87; x < 300; ++x)
+            for (int y = 143 + 32 * r; y < 175 + 32 * r; ++y)
+                if (*view_at(page, x, y) != 0xff000000u) ends[r] = x;
+    NEAR(ends[0], 87 + text_w("The Middle", 18, 0), 3);
+    NEAR(ends[1], 87 + text_w("THE MIDDLE", 18, 2), 3);
+    CHECK(ends[1] > ends[0] + 20);
     /* a box's corners are round: its own corner pixel is left, its middle is filled */
     memset(page, 0, PAGE_PX * sizeof *page);
     rbox(page, 100, 100, 80, 40, 12, 0xffffff, 255, 0);
@@ -537,6 +591,19 @@ static void check_controls(void) {
     SAME(skip_text(-130, t, sizeof t), "-2:10");
     SAME(time_text(360000000, t, sizeof t), "100:00:00");
 
+    /* the fuel gauge's text: the first run of digits in its first 32 bytes, 0 to 100 */
+    CHECK(battery_level("40\n") == 40 && battery_level("100") == 100 && battery_level("0\n") == 0);
+    CHECK(battery_level("capacity: 87 %\n") == 87 && battery_level("  7\n") == 7);
+    CHECK(battery_level("101\n") == -1 && battery_level("") == -1 && battery_level("full") == -1 &&
+          battery_level("4000") == -1 && battery_level("-5") == 5);
+    CHECK(battery_level("................................55") == -1 &&
+          battery_level("...............................55") == 5); /* 32 bytes, no more */
+    /* charging by the status's first word */
+    CHECK(battery_charging("Charging\n") && battery_charging("Full\n") &&
+          battery_charging("Charging"));
+    CHECK(!battery_charging("Discharging\n") && !battery_charging("Not charging\n") &&
+          !battery_charging("") && !battery_charging("Fully\n") && !battery_charging("Unknown\n"));
+
     /* a tap: the dots at the top right, the bar's band, the middle; the bar's ends are its ends */
     CHECK(hit(330, 24) == HIT_MENU && hit(300, 50) == HIT_MENU && hit(290, 24) == HIT_NONE &&
           hit(330, 60) == HIT_NONE);
@@ -698,7 +765,8 @@ static pid_t begin(int device, const char *name, const char *rel, const char *sc
     setenv("VIDEOS_SCRIPT", path, 1), setenv("VIDEOS_OUT", dir, 1);
     setenv("Q2_URI", "play", 1), setenv("Q2_CONTEXT", rel, 1);
     unsetenv("Q2_POPUP"), unsetenv("VIDEOS_CLOCK"), unsetenv("VIDEOS_MEM_KB"),
-        unsetenv("VIDEOS_SINK");
+        unsetenv("VIDEOS_SINK"), unsetenv("VIDEOS_SLOW");
+    setenv("VIDEOS_BATTERY", TMP "/none", 1), setenv("VIDEOS_CHARGE", TMP "/none", 1);
     snprintf(env, sizeof env, "%s", more ? more : "");
     for (char *v = strtok(env, "\n"); v; v = strtok(0, "\n")) {
         char *eq = strchr(v, '=');
@@ -764,6 +832,12 @@ static long long num(const char *name, const char *key) {
 }
 /* Its subtitle lines, a | between two; its notice; where its picture lies. */
 static const char *lines(const char *name) { return strstr(at(name), " text=") + 6; }
+static const char *rows(const char *name) { /* the menu's, as "label:value;label:value" */
+    static char n[512];
+    const char *p = strstr(at(name), " rows=") + 6;
+    snprintf(n, sizeof n, "%.*s", (int)strcspn(p, "|"), p);
+    return n;
+}
 static const char *notice(const char *name) {
     static char n[128];
     const char *p = strstr(at(name), " notice=") + 8;
@@ -848,7 +922,7 @@ static int differ(const char *a_dir, const char *a, const char *b_dir, const cha
 static int moved(const char *a, const char *b) { return differ(dir, a, dir, b, 0); }
 
 #define WHITE 0xffffffu
-#define GREY 0x5a5a5au /* the bar's part not played */
+#define GREY 0x595959u /* the bar's part not played: white at 90 of 255, on a black band */
 
 /* Plays to the end, in step, and leaves the video watched; left early, the start is kept. */
 static void run_plain(void) {
@@ -1212,14 +1286,49 @@ static void run_controls(void) {
     CHECK(rgb("shown", 21 + 333 * 10000 / 30024 - 2, 285) == GREY);
     /* the times under it, the title cut to fit between the corners, the three dots */
     CHECK(ink("shown", 46, 296, 90, 310) > 60 && ink("shown", 285, 296, 329, 310) > 60);
-    CHECK(ink("shown", 72, 12, 302, 36) > 600 && !ink("shown", 0, 0, 71, 43) &&
-          !ink("hidden", 0, 0, 374, 43));
+    CHECK(ink("shown", 63, 12, 311, 36) > 600 && !ink("shown", 0, 0, 62, 43) &&
+          !ink("shown", 312, 0, 319, 43) && !ink("hidden", 0, 0, 374, 43));
     CHECK(rgb("shown", 324, 24) == WHITE && rgb("shown", 331, 24) == WHITE &&
           rgb("shown", 338, 24) == WHITE && rgb("shown", 328, 24) != WHITE);
     /* with them up: the middle pauses and plays, elsewhere hides them, the dots open the options */
     CHECK(num("paused", "paused") && !num("on", "paused") && !num("hid", "controls"));
     CHECK(num("menu", "menu") == 1 &&
           !num("closed", "menu")); /* and a tap off the box closes them */
+
+    /* the battery, at the left of the title, 22 x 11 from (31, 19): its outline, its nub, and
+     * the charge inside, of the 16 px there; none when the gauge says nothing that is one */
+    static const struct {
+        const char *level, *status;
+        int w;
+        unsigned fill;
+    } bat[] = { { "40\n", "Discharging\n", 6, WHITE }, { "10\n", "Not charging\n", 2, 0xff3b30 },
+                { "15", "Discharging", 2, 0xff3b30 },  { "16", "Discharging", 2, WHITE },
+                { "40\n", "Charging\n", 6, 0x34c759 }, { "100\n", "Full\n", 16, 0x34c759 },
+                { "capacity\n", "Charging\n", -1, 0 }, { "101\n", "Charging\n", -1, 0 } };
+    for (size_t i = 0; i < sizeof bat / sizeof *bat; ++i) {
+        CHECK(file_put(TMP "/battery", bat[i].level, strlen(bat[i].level)) &&
+              file_put(TMP "/charge", bat[i].status, strlen(bat[i].status)));
+        play("battery", rel, "500 tap 187 160\n600 shot a\n700 key 170\n",
+             "VIDEOS_BATTERY=" TMP "/battery\nVIDEOS_CHARGE=" TMP "/charge");
+        if (bat[i].w < 0) {
+            CHECK(!ink("a", 0, 0, 62, 43) && num("a", "battery") == -1);
+            continue;
+        }
+        int frame = 2 * 20 + 2 * 9 + 2 * 5, inside = bat[i].w * 7;
+        CHECK(num("a", "battery") == atoi(bat[i].level));
+        CHECK(ink("a", 0, 0, 62, 43) == frame + inside &&
+              ink("a", 31, 19, 52, 29) == frame + inside);
+        CHECK(count("a", 31, 19, 52, 29, WHITE) == frame + (bat[i].fill == WHITE ? inside : 0) &&
+              count("a", 33, 21, 32 + bat[i].w, 27, bat[i].fill) == inside);
+        CHECK(rgb("a", 31, 19) == WHITE && rgb("a", 50, 29) == WHITE && rgb("a", 52, 26) == WHITE &&
+              rgb("a", 52, 21) == 0 && rgb("a", 32, 24) == 0);
+    }
+    /* read as the controls come up, and again every 30 s while they stay: the wheel's volume
+     * file stands in for a gauge that changes (the "?" at the start, then the level asked for) */
+    play("battery-again", rel,
+         "200 v 40\n500 key 171\n600 shot a\n700 w -28\n800 shot b\n31000 shot c\n31100 key 170\n",
+         "VIDEOS_BATTERY=" TMP "/q2-videos.volume");
+    CHECK(num("a", "battery") == -1 && num("b", "battery") == -1 && num("c", "battery") == 41);
 }
 
 /* The wheel is the Q2's volume, by Q2 Pod's file, and Q2 Pod's word moves the bar. */
@@ -1350,6 +1459,9 @@ static void run_subs(void) {
     SAME(lines("a"), "First line|Second line"), SAME(lines("b"), "Привет, мир");
     CHECK(num("menu", "menu") == 1 && num("menu", "sel") == 0 && num("list", "menu") == 3 &&
           num("list", "sel") == 1);
+    /* a file without a language is its place in the list; the other its language */
+    SAME(rows("menu"), "Subtitles:Track 1;Fit to Screen:Off;Start Over:");
+    SAME(rows("list"), "Off:;Track 1:\xe2\x9c\x93;Japanese:");
     CHECK(num("c", "sub") == 1);
     SAME(lines("c"), ""), SAME(lines("d"), ""); /* the other file has nothing there */
     CHECK(mark_of("sidecar.mp4").sub == 2);
@@ -1359,6 +1471,17 @@ static void run_subs(void) {
     play("sidecar-latin", "sidecar.mp4", "7500 shot a\n", 0);
     SAME(lines("a"),
          "Caf\xe9 d\xe9j\xe0 vu"); /* é and à as Latin-1's one byte each, drawn as such */
+
+    /* subtitles that are pictures can't be drawn: listed, by their language, and not to be had */
+    videos("pictures.mkv");
+    play("pictures", "pictures.mkv",
+         "500 shot a\n600 k d 171\n1400 k u 171\n1450 shot menu\n1500 key 218\n1550 shot list\n"
+         "1600 w -28\n1650 key 218\n1700 shot still\n1800 key 170\n1850 key 170\n1900 key 170\n",
+         0);
+    CHECK(says("nsubs=1 nside=0") && num("a", "sub") == -1 && num("list", "menu") == 3 &&
+          num("still", "menu") == 1 && num("still", "sub") == -1); /* Off was all to choose */
+    SAME(rows("menu"), "Subtitles:Off;Fit to Screen:Off;Start Over:");
+    SAME(rows("list"), "Off:\xe2\x9c\x93;English:Unavailable");
 
     /* the three sizes, over a black page (sound alone), where the ink is theirs; and in one
      * place, the last line's bottom at y 262, whether the controls are up or not */
@@ -1382,6 +1505,7 @@ static void run_subs(void) {
         /* nothing shows through the options, and they are back when those close */
         CHECK(num("m", "menu") == 1 && !ink("m", 0, 236, 374, 264) && !num("back", "menu") &&
               ink("back", 0, 200, 374, 264) == n[i]);
+        SAME(rows("m"), "Subtitles:On;Start Over:"); /* the one file beside it: On or Off */
         /* five lines are five lines at any size, the smallest: none of them is left out */
         SAME(lines("c"), "One|Two|Three|Four|Five");
         CHECK(ink("c", 0, 176, 374, 190) > 30 && ink("c", 0, 248, 374, 262) > 30 &&
@@ -1447,6 +1571,10 @@ static void run_menu(void) {
          "4000 shot fit\n4100 key 170\n",
          0);
     SAME(geom("a"), "0,0,375,320");
+    /* over a bright picture the bands are three quarters black: the yellow bar's 255 is 65
+     * under one, and the bar's part not played is lighter than its band there too */
+    NEAR(rgb("p", 150, 10) >> 16, 65, 6), NEAR(rgb("p", 150, 10) >> 8 & 0xff, 65, 6);
+    CHECK((rgb("p", 200, 285) >> 16) > (rgb("p", 200, 277) >> 16) + 40);
     SAME(geom("fit"), "0,54,375,211"); /* paused: the same picture again, in its other shape */
     CHECK(num("fit", "paused") && num("fit", "pic") == num("p", "pic") && !num("fit", "fill"));
     settings_load(&set);
@@ -1573,9 +1701,10 @@ static void run_refused(void) {
     CHECK(num("b", "state") == ENG_READY && num("b", "pic") > 3900 && says("end grow.ts over"));
     SAME(geom("a"), geom("b")); /* 16:9 before and after */
     play("no-decoder", "av1.mkv", "500 shot a\n600 key 218\n", 0);
-    CHECK(says("fail The Q2 has no decoder for AV1 video.\n") && says("end av1.mkv quit"));
+    CHECK(says("fail The Q2 can't play AV1 video. Convert it to H.264.\n") &&
+          says("end av1.mkv quit"));
     play("text", "notes.mp4", "500 shot a\n600 key 218\n", 0);
-    CHECK(says("fail It is not a video file the Q2 knows.\n"));
+    CHECK(says("fail The file is damaged or isn't a video.\n"));
     play("missing", "gone.mp4", "500 shot a\n600 key 218\n", 0);
     CHECK(says("fail The file can't be read.\n") && num("a", "state") == ENG_FAILED);
     play("outside", "../.videos/marks", "500 shot a\n600 key 218\n", 0);
@@ -1587,9 +1716,9 @@ static void run_refused(void) {
                              "\nh264-aac.mp4\n#EXT-X-ENDLIST\n");
     CHECK(follows(CARD "/Videos/list.mp4") && follows(CARD "/Videos/stream.mp4"));
     play("list", "list.mp4", "500 shot a\n600 key 218\n", 0);
-    CHECK(says("fail It is not a video file the Q2 knows.\n") && !says("ready"));
+    CHECK(says("fail The file is damaged or isn't a video.\n") && !says("ready"));
     play("stream", "stream.mp4", "500 shot a\n600 key 218\n", 0);
-    CHECK(says("fail It is not a video file the Q2 knows.\n") && !says("ready"));
+    CHECK(says("fail The file is damaged or isn't a video.\n") && !says("ready"));
 }
 
 /* Play Next: the next in the folder when one plays out, and only then. */
