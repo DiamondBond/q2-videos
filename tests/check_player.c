@@ -380,6 +380,8 @@ static void check_sound(void) {
     CHECK(arg_gain("37") == bt_gain(37) && arg_gain("100") == 65536 && arg_gain("0") == 0);
     CHECK(arg_gain("h41") == 65536 && arg_gain(0) == 65536 &&
           arg_gain("") == 65536); /* the DAC's own; the jack */
+    CHECK(arg_level("37") == 37 && arg_level("h41") == 41 && arg_level("250") == 100);
+    CHECK(arg_level(0) == -1 && arg_level("") == -1 && arg_level("h") == -1);
 
     short s[6] = { 32767, -32768, 1000, -1000, 0, 7 };
     scale(s, 6, 32768);
@@ -646,8 +648,9 @@ static pid_t begin(int device, const char *name, const char *rel, const char *sc
         execl("/bin/sh", "sh", "-c", env, (char *)0);
         _exit(127);
     }
-    char *argv[] = { "q2-videos", "plughw:0,0", 0 };
-    exit(player_main(2, argv)); /* exit, not _exit: what it leaked is told */
+    /* ARG2 in more: the volume argument Q2 Pod gives on Bluetooth and USB */
+    char *argv[] = { "q2-videos", "plughw:0,0", getenv("ARG2"), 0 };
+    exit(player_main(argv[2] ? 3 : 2, argv)); /* exit, not _exit: what it leaked is told */
 }
 
 /* Waits for the run to end, well, and reads its log into said. */
@@ -1141,6 +1144,41 @@ static void run_volume(void) {
     char *asked = file_get(TMP "/q2-videos.volume", 0);
     SAME(asked, "0");
     free(asked);
+
+    /* Q2 Pod's side played by the script (platform_script.c's fw), the Maximum volume 60 */
+    play("firmware", "h264-aac.mp4",
+         "0 firmware 41 60\n500 shot f0\n1000 w -56\n1100 shot f1\n3000 w -560\n3100 shot f2\n"
+         "3400 shot f3\n5000 w -28\n5400 shot f4\n5500 w -28\n5900 shot f5\n6000 outside 59\n"
+         "6100 shot f6\n7000 w -56\n7400 shot f7\n8000 key 170\n",
+         0);
+    CHECK(num("f0", "told") == 41 && num("f0", "volume") == -1); /* the start's "?" answered */
+    CHECK(num("f1", "volume") == 43 && num("f1", "told") == 43); /* set, and said so */
+    /* twenty up: 63 asked and 60 answered, which the bar shows once the wheel has rested */
+    CHECK(num("f2", "volume") == 63 && num("f2", "told") == 60 && num("f3", "volume") == 60);
+    /* at the limit: 61 asked, 60 answered; 61 again is the file's text as it was, and nothing
+     * is answered: the bar is still Q2 Pod's last word */
+    CHECK(num("f4", "volume") == 60 && num("f5", "volume") == 60 && num("f5", "told") == 60);
+    /* a change from elsewhere moves the bar, and with the file gone 61 can be asked again */
+    CHECK(num("f6", "volume") == 59 && num("f6", "told") == 59);
+    CHECK(num("f7", "volume") == 60 && num("f7", "told") == 60);
+    asked = file_get(TMP "/q2-videos.volume", 0);
+    SAME(asked, "61");
+    free(asked);
+    /* on Bluetooth the answer carries the gain to apply; on a USB DAC, which applies it itself,
+     * a level to show. Until Q2 Pod answers, the level is the volume argument's. */
+    play("argument", "h264-aac.mp4", "300 w -28\n400 shot a\n1000 key 170\n", "ARG2=37");
+    CHECK(num("a", "volume") == 38 && num("a", "told") == -1 && num("a", "gain") == bt_gain(37));
+    play("firmware-bt", "h264-aac.mp4",
+         "0 firmware 30 100 bt\n600 shot b\n1000 w -280\n1400 shot c\n2000 outside 20\n"
+         "2100 shot d\n2500 key 170\n",
+         "ARG2=37");
+    CHECK(num("b", "told") == 30 && num("b", "volume") == -1 && num("b", "gain") == bt_gain(30));
+    CHECK(num("c", "volume") == 40 && num("c", "gain") == bt_gain(40));
+    CHECK(num("d", "volume") == 20 && num("d", "gain") == bt_gain(20));
+    play("firmware-usb", "h264-aac.mp4",
+         "0 firmware 30 100 usb\n600 shot b\n1000 w -280\n1400 shot c\n2500 key 170\n", "ARG2=h37");
+    CHECK(num("b", "told") == 30 && num("b", "gain") == 65536);
+    CHECK(num("c", "volume") == 40 && num("c", "told") == 40 && num("c", "gain") == 65536);
 }
 
 /* The sound tracks: the default, another chosen in the options, and that one remembered. */

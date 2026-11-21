@@ -128,6 +128,9 @@ int bt_gain(int v);
 /* The gain for Q2 Pod's volume argument: "NN" is bt_gain's, "hNN" (the DAC applies it), none or
  * anything else unity. */
 int arg_gain(const char *arg);
+/* The level that argument names, "NN" or "hNN": where the volume stands until Q2 Pod says; -1
+ * without one. */
+int arg_level(const char *arg);
 void scale(short *s, unsigned n, int g); /* n samples times g / 65536 */
 void mono(short *s, unsigned n);         /* n stereo frames, each channel their mean */
 void swap_lr(short *s, unsigned n);      /* n stereo frames, left and right exchanged */

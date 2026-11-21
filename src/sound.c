@@ -19,6 +19,13 @@ int arg_gain(const char *arg) {
     return bt_gain(atoi(arg));
 }
 
+int arg_level(const char *arg) {
+    if (arg && *arg == 'h') ++arg;
+    if (!arg || *arg < '0' || *arg > '9') return -1;
+    int v = atoi(arg);
+    return v > 100 ? 100 : v;
+}
+
 void scale(short *s, unsigned n, int g) { /* g is at most 65536, so no sample overflows */
     for (unsigned i = 0; i < n; ++i) s[i] = (short)(s[i] * g >> 16);
 }

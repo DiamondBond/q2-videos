@@ -329,10 +329,11 @@ static void volume_turn(int ticks, long long now) {
  * headset's own change), and on Bluetooth or USB the gain to apply. While our own asking is
  * fresh the bar stays where the wheel put it: answers to a fast turn come one behind another. */
 static void volume_told(const event_t *e, long long now) {
+    int first = P.told < 0; /* its answer to the start's asking: no bar for that */
     P.told = e->a < 0 ? 0 : e->a > 100 ? 100 : e->a;
     if (*e->arg) eng_gain(P.gain = arg_gain(e->arg));
     if (P.asked_at) return;
-    if (P.volume >= 0 && P.volume != P.told) V.volume_until = now + VOLUME_MS;
+    if (!first && P.volume != P.told) V.volume_until = now + VOLUME_MS;
     P.volume = P.told;
 }
 
@@ -871,10 +872,11 @@ int player_main(int argc, char **argv) {
     snprintf(P.volume_path, sizeof P.volume_path, "%s/q2-videos.volume", tmp_dir);
     snprintf(P.dim_path, sizeof P.dim_path, "%s/q2-videos.dim", tmp_dir);
     /* The sound is Q2 Pod's to hand over: the device, and on Bluetooth or USB the volume to
-     * apply. Where the volume stands it says when asked, now that the socket can hear it. */
+     * apply. Where the volume stands it says when asked, now that the socket can hear it;
+     * until it has, the level is that argument's, and without one the wheel waits. */
     P.device = P.plat == &plat_script ? 0 : argc > 1 ? argv[1] : 0;
     P.gain = arg_gain(argc > 2 ? argv[2] : 0);
-    P.volume = P.told = -1;
+    P.volume = arg_level(argc > 2 ? argv[2] : 0), P.told = -1;
     volume_ask("?");
     if (P.plat == &plat_script)
         eng_test((unsigned)atoi(getenv("VIDEOS_MEM_KB") ? getenv("VIDEOS_MEM_KB") : "0"),
