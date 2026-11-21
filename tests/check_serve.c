@@ -723,8 +723,10 @@ static int thumb(const char *path, thumb_t *t, look_t *k) {
     memset(t, 0, sizeof *t), memset(k, 0, sizeof *k);
     long long began = now_ms();
     int made = thumb_make(path, THUMB_MS, t, jpg, &n);
-    CHECK(now_ms() - began < THUMB_MS + 1500); /* never much past its time */
-    CHECK(t->state == (made ? T_PICTURE : T_NONE));
+    long long took = now_ms() - began;
+    CHECK(took < THUMB_MS + 1500); /* never much past its time */
+    /* none for good, unless its time ran out */
+    CHECK(t->state == (made ? T_PICTURE : took > THUMB_MS ? T_LATER : T_NONE));
     if (made)
         CHECK(n > 100 && n <= THUMB_BYTES && file_put(TMP "/t.jpg", jpg, n)),
             cover_ok(TMP "/t.jpg", k);
@@ -768,10 +770,10 @@ static void check_thumbs(void) {
        ffmpeg);
     CHECK(thumb(TMP "/dark.mkv", &t, &k) && k.luma < 20);
 
-    /* out of time: let go, and no picture */
+    /* out of time: let go, and no picture for now (a slow card is not the file's doing) */
     snprintf(path, sizeof path, "%s/big-1080p.mp4", clips);
     size_t n = 0;
-    CHECK(!thumb_make(path, 0, &t, jpg, &n) && t.state == T_NONE);
+    CHECK(!thumb_make(path, 0, &t, jpg, &n) && t.state == T_LATER);
 
     /* files that are no videos, whatever their name: no picture, and no harm */
     static const char *const junk[] = { "empty.mp4", "one.mkv", "text.avi", "zeros.mp4",
@@ -977,6 +979,39 @@ static void check_covers(void) {
           ask("menu") == 9 && covers() == 9);
     CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
 
+    /* A cause that is not the file's and may pass: the video has the "no picture" tile while
+     * this server runs and is not tried again in that time, but no line is saved for it, so
+     * the next server tries it once more. Too little memory free for its frames (the host
+     * build's hook: a Q2 with 20 MB free, a 1080p video)... */
+    sh("cp -p '%s/big-1080p.mp4' " V, clips);
+    unsigned long long big = key_of(CARD "/Videos", "big-1080p.mp4");
+    setenv("VIDEOS_MEM_KB", "20000", 1);
+    CHECK(ask("menu") == 10 && covers() == 9 && worker_pass(level, -1, -1) == 0);
+    unsetenv("VIDEOS_MEM_KB");
+    CHECK((t = index_find(big)) && t->state == T_LATER && t->w == 1920 && t->h == 1080);
+    CHECK(ask("menu") == 10 && covers() == 10), SAME(ROW(3, CTX), "big-1080p.mp4");
+    SAME(ROW(3, SUB), "5 s"); /* what was read of it is shown */
+    CHECK(same_file(art_path("play", "big-1080p.mp4"), "assets/tile-nopicture.jpg"));
+    CHECK(worker_pass(level, -1, -1) == 0 && index_find(big)->state == T_LATER);
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+    index_free(), index_load(); /* the next server: its memory is free */
+    CHECK(!index_find(big) && worker_pass(level, -1, -1) == 0);
+    CHECK((t = index_find(big)) && t->state == T_PICTURE);
+    CHECK(index_lines(CARD, &pictures) == 12 && pictures == 3 && cache_files() == 4);
+    /* ...and a card that didn't take the thumbnail (a folder where it is written) */
+    char block[PATH_N + 8];
+    sh("touch -d @86400 " V "big-1080p.mp4"); /* another video, by its key */
+    big = key_of(CARD "/Videos", "big-1080p.mp4");
+    snprintf(block, sizeof block, "%s.new", thumb_file(big, path));
+    CHECK(!mkdir(block, 0755) && worker_pass(level, -1, -1) == 0);
+    CHECK((t = index_find(big)) && t->state == T_LATER && t->w == 1920 && !rmdir(block));
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+    index_free(), index_load();
+    CHECK(worker_pass(level, -1, -1) == 0 && index_find(big)->state == T_PICTURE);
+    unlink(V "big-1080p.mp4");
+    CHECK(worker_pass(level, -1, -1) == 0);
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+
     /* the cache tidied at a round's start: the lines and thumbnails of videos that are gone,
      * files that are no line's thumbnail, and a line whose thumbnail is gone, made again */
     unsigned long long rot = key_of(CARD "/Videos", "rotated.mp4"),
@@ -1132,42 +1167,66 @@ static void await_covers(int ms, int rows, int pictures) {
     CHECK(!pictures);
 }
 
-/* The card of the run: these clips at the top with killer.mp4, a copy of one, and two in a
- * folder. Three of them have no picture to make a thumbnail of: one has none, one has a song's
- * cover alone, and one is in a codec the Q2 has no decoder for. */
+/* The card of the run: these clips at the top, with killer.mp4, a copy of one, and huge.avi,
+ * made here; and two in a folder. Four have no picture to make a thumbnail of: one has none,
+ * one has a song's cover alone, one is in a codec the Q2 has no decoder for, and huge.avi's is
+ * 8192 x 4320, a frame the worker's cap on one allocation of FFmpeg's refuses. */
 static const char *const TOP[] = { "60fps.mp4",    "anamorphic.mp4", "audio-only.mp4",
                                    "av1.mkv",      "big-1080p.mp4",  "cover.mp4",
                                    "h264-aac.mp4", "hevc.mp4",       "mpeg4.avi",
                                    "no-audio.mp4", "rotated.mp4",    "sidecar.mp4",
                                    "vp9-opus.webm" };
 enum {
-    TOPS = sizeof TOP / sizeof *TOP + 1, /* the videos at the top */
-    BLANK = 3,                           /* audio-only.mp4, cover.mp4, av1.mkv */
-    ROWS = TOPS + 2,                     /* the top's rows: the folder, the videos, Settings */
-    ALL = TOPS + 2                       /* the card's videos */
+    CLIPS = sizeof TOP / sizeof *TOP,
+    TOPS = CLIPS + 2, /* the videos at the top */
+    BLANK = 4,        /* audio-only.mp4, cover.mp4, av1.mkv, huge.avi */
+    ROWS = TOPS + 2,  /* the top's rows: the folder, the videos, Settings */
+    ALL = TOPS + 2    /* the card's videos */
 };
+
+/* The server's worker, its child: its pid, 0 when it has none. */
+static pid_t worker_of(pid_t pid) {
+    char cmd[64], out[32] = "";
+    snprintf(cmd, sizeof cmd, "pgrep -P %d", (int)pid);
+    FILE *p = popen(cmd, "r");
+    CHECK(p && (fgets(out, sizeof out, p), pclose(p) >= 0));
+    return atoi(out);
+}
+/* 1 when the process pid is no more, or is only waiting to be reaped. */
+static int dead(pid_t pid) {
+    char path[64], *stat, *state;
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    if (!(stat = file_get(path, 0))) return 1;
+    int dead = !(state = strrchr(stat, ')')) || state[2] == 'Z' || state[2] == 'X';
+    free(stat);
+    return dead;
+}
 
 static void check_server(char **cmd, int host) {
     look_t k;
     int pictures, lock;
     sh("rm -rf " ECARD " " ETMP " && mkdir -p " ECARD "/Videos/Series " ECARD "/.videos " ETMP);
-    for (int i = 0; i < TOPS - 1; ++i) sh("cp -p '%s/%s' " ECARD "/Videos/", clips, TOP[i]);
+    for (int i = 0; i < CLIPS; ++i) sh("cp -p '%s/%s' " ECARD "/Videos/", clips, TOP[i]);
     sh("cp -p '%s/ass.mkv' '%s/two-audio-subs.mkv' " ECARD "/Videos/Series/", clips, clips);
     sh("cp assets/tile-*.jpg " ECARD "/.videos/ && cp " ECARD "/Videos/60fps.mp4 " ECARD
        "/Videos/killer.mp4");
+    sh("'%s' -v error -y -f lavfi -i color=red:size=8192x4320:rate=1:duration=2 -c:v mjpeg -q:v "
+       "10 " ECARD "/Videos/huge.avi",
+       ffmpeg);
     text(ETMP "/q2-addon.caps", CAPS "\n");
     text(ETMP "/q2-videos.art.stale", "x"); /* not ours */
     sh("mkdir " ETMP "/q2-videos.art && touch " ETMP "/q2-videos.art/deadbeef.jpg " ETMP
        "/q2-videos.browse.sock");
 
     /* its start: an earlier run's socket and covers gone, the list answered before any thumbnail */
-    start(cmd, host ? "VIDEOS_CRASH=killer" : 0);
+    start(cmd, host ? "VIDEOS_CRASH=killer VIDEOS_MEM_KB=4000000" : 0);
     CHECK(ask("menu") == ROWS && covers() == 2 && access(ETMP "/q2-videos.art/deadbeef.jpg", 0));
     row_is(0, "list", "dir", "Series", "2 videos", "Series", "");
     row_is(ROWS - 1, "list", "settings", "Settings", "", "", "");
     /* The thumbnails, as they come. The host build's worker dies on killer.mp4 (the checks'
      * hook, a decoder's crash): the server answers on, that video has the "no picture" tile, and
-     * the others their thumbnails. */
+     * the others their thumbnails. Its memory is said to be 4 GB free, so that huge.avi is
+     * refused by the cap and not for the memory of the computer the check runs on. */
     await_covers(host ? 60000 : 240000, ROWS - 1, TOPS - BLANK - host);
     CHECK(ask("dir\tSeries") == 2);
     for (long long end = now_ms() + 60000; covers() < 2; nap(200))
@@ -1175,6 +1234,7 @@ static void check_server(char **cmd, int host) {
     CHECK(index_lines(ECARD, &pictures) == ALL && pictures == ALL - BLANK - host);
     index_load();
     CHECK(index_find(key_of(ECARD "/Videos", "killer.mp4"))->state == (host ? T_NONE : T_PICTURE));
+    CHECK(index_find(key_of(ECARD "/Videos", "huge.avi"))->state == T_NONE);
     index_free();
 
     /* a thumbnail deleted from the cache is made again, once its row's cover is looked for anew
@@ -1243,22 +1303,25 @@ static void check_server(char **cmd, int host) {
     start(cmd, 0);
     CHECK(ask("menu") == 50), SAME(MSG, "pages");
     nap(host ? 100 : 1500);
-    /* a player starting meanwhile has the lock once the video in the making is done, and keeps
-     * it: nothing is made under it */
+    /* a player starting meanwhile has the lock once the video in the making is done (that one,
+     * and one more if it began as the wait did), and keeps it: nothing is made under it */
     began = now_ms();
+    int before = index_lines(ECARD, &pictures);
     CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < THUMB_MS + 1000);
     int had = index_lines(ECARD, &pictures);
     nap(1200);
     CHECK(index_lines(ECARD, &pictures) == had && had < ALL + 40); /* it was not through */
+    CHECK(had - before <= 2);
     close(lock);
     stop();
+    sh("rm -rf " ECARD "/Videos/copy*.mp4");
+
     if (!host) return;
 
     /* A decoder that never comes back (the host build's hook, on hang.mp4): the server ends that
      * worker after its time, here a second; the video has the "no picture" tile, the others
      * their thumbnails, and the lock is free again for a player. */
-    sh("rm -rf " ECARD "/Videos/copy*.mp4 " ECARD "/.videos/cache && cp " ECARD
-       "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
+    sh("rm -rf " ECARD "/.videos/cache && cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
     start(cmd, "VIDEOS_HANG=hang VIDEOS_STUCK_MS=1000");
     CHECK(ask("menu") == ROWS + 1);
     for (long long end = now_ms() + 60000; covers() < ROWS + 1; nap(200))
@@ -1271,6 +1334,44 @@ static void check_server(char **cmd, int host) {
     close(lock);
     stop();
     unlink(ECARD "/Videos/hang.mp4");
+
+    /* A worker the kernel killed for want of memory (here by hand, a second into its hang on
+     * oom.mp4): not the video's doing. It has the "no picture" tile while this server runs,
+     * the worker started next passes it by, and no line is saved for it... */
+    sh("cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/oom.mp4");
+    start(cmd, "VIDEOS_HANG=oom");
+    for (long long end = now_ms() + 15000; access(art_path("play", "oom.mp4"), 0); nap(100)) {
+        pid_t w = worker_of(server);
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+        if (w > 0) nap(1000), kill(w, SIGKILL);
+    }
+    CHECK(same_file(art_path("play", "oom.mp4"), "assets/tile-nopicture.jpg"));
+    nap(3000); /* the next worker is started within two seconds, and is soon through */
+    for (long long end = now_ms() + 5000; worker_of(server); nap(100)) CHECK(now_ms() < end);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS + 1);
+    CHECK(index_lines(ECARD, &pictures) == ALL && pictures == ALL - BLANK);
+    stop();
+    /* ...so the next server tries it once more: its thumbnail */
+    start(cmd, 0);
+    for (long long end = now_ms() + 60000; access(art_path("play", "oom.mp4"), 0); nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+    cover_ok(art_path("play", "oom.mp4"), &k);
+    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL + 1 - BLANK);
+    stop();
+    unlink(ECARD "/Videos/oom.mp4");
+
+    /* A server killed outright leaves no worker behind, even one that would never come back
+     * from a decoder. */
+    sh("cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/orphan.mp4");
+    start(cmd, "VIDEOS_HANG=orphan");
+    pid_t orphan;
+    for (long long end = now_ms() + 5000; (orphan = worker_of(server)) <= 0; nap(50))
+        CHECK(now_ms() < end);
+    nap(500); /* it hangs by now */
+    CHECK(!dead(orphan) && !kill(server, SIGKILL) && ended(1000) == -1);
+    for (long long end = now_ms() + 2000; !dead(orphan); nap(20))
+        if (now_ms() >= end) kill(orphan, SIGKILL), CHECK(!"a worker left behind");
+    unlink(ECARD "/Videos/orphan.mp4");
 
     /* Idleness, the ten minutes as 1.5 s through the host build's hook: the server ends itself
      * with status 0 (run's loop then ends), counted from the last request... */

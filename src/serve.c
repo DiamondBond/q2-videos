@@ -211,6 +211,7 @@ static struct {
     int want;                  /* one is to start: a level has work for it, or the start's */
     int off;                   /* none is started any more: it can't work here */
     int told, fails;           /* lines it told since it started; deaths in a row on no video */
+    int killed;                /* the server has ended it itself, stuck on a video */
     long long next;            /* when one may start, a moment after one died */
     unsigned long long trying; /* the video it is on, 0 none, and since when */
     long long since;
@@ -250,7 +251,7 @@ static void worker_start(void) {
         return;
     }
     wk.to = to[1], wk.from = from[0];
-    wk.want = wk.told = 0, wk.sent = 1, wk.trying = 0;
+    wk.want = wk.told = wk.killed = 0, wk.sent = 1, wk.trying = 0;
 }
 
 /* What the worker told, taken; and its end, when it has shut its pipe. One that died takes the
@@ -269,6 +270,13 @@ static void worker_read(void) {
     waitpid(wk.pid, &status, 0);
     close(wk.to), close(wk.from);
     wk.pid = 0, wk.to = wk.from = -1;
+    /* Ended by a KILL that was not the server's: the kernel's, for want of memory (the worker is
+     * the first it takes). That is not the doing of the video it was on, which has no picture
+     * for now; and the death counts as one on no video, so three in a row start no fourth.
+     * ponytail: a KILL sent by hand reads the same, and costs that video its thumbnail until
+     * the server next starts. */
+    if (wk.trying && !wk.killed && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL)
+        index_put(&(thumb_t){ .key = wk.trying, .state = T_LATER }), wk.trying = 0;
     if (WIFEXITED(status) && !WEXITSTATUS(status)) {
         /* through. A level that still lists a video without a line starts another; one that
          * then has nothing to tell either is not started again for a while */
@@ -590,7 +598,7 @@ int serve_main(void) {
         }
         now = now_ms();
         /* a worker that is stuck: ended here, and seen to by worker_read as any that died */
-        if (wk.pid > 0 && wk.trying && now - wk.since > stuck) kill(wk.pid, SIGKILL);
+        if (wk.pid > 0 && wk.trying && now - wk.since > stuck) wk.killed = !kill(wk.pid, SIGKILL);
         /* A video playing: Q2 Pod asks nothing meanwhile, which is not idleness, and the ten
          * minutes start again when the player ends. No worker is started under it either. */
         if ((fd = lock_take(0)) < 0)
