@@ -16,6 +16,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -434,12 +435,26 @@ static void check_levels(void) {
     unlink(CARD "/.videos/marks");
     CHECK(!act("dir\tSeries/Season 3")), SAME(STATUS, "unavailable");
 
-    /* Sort: Newest First is the videos by when they changed; the folders stay as they were */
+    /* Sort: Recently Added is the videos by when each came to the card (its creation time, not
+     * the date it has: a copied file keeps that), the last first; the folders stay as they were.
+     * One is put there anew: the last to come, and not the last changed. */
+    struct statx sx;
+    nap(20); /* past a tick of the file system's clock */
+    unlink(V "Episode 1.MP4"), file(V "Episode 1.MP4", 12 << 10, 2000);
     CHECK(!act("set\tsort")), SAME(STATUS, "ok"), SAME(MSG, "");
     CHECK(ask("menu") == 7);
-    SAME(ROW(0, TITLE), "Movies"), SAME(ROW(1, TITLE), "Series"), SAME(ROW(2, TITLE), "episode 2");
-    SAME(ROW(3, TITLE), "Episode 1"), SAME(ROW(4, TITLE), "Episode 10"),
-        SAME(ROW(5, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+    SAME(ROW(0, TITLE), "Movies"), SAME(ROW(1, TITLE), "Series");
+    if (!syscall(SYS_statx, AT_FDCWD, V "Episode 1.MP4", 0, STATX_BTIME, &sx) &&
+        sx.stx_mask & STATX_BTIME) {
+        SAME(ROW(2, TITLE), "Episode 1"), SAME(ROW(3, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+        SAME(ROW(4, TITLE), "episode 2"), SAME(ROW(5, TITLE), "Episode 10");
+    }
+    /* a card that keeps no creation time: by when each was last changed */
+    setenv("VIDEOS_NO_BTIME", "1", 1);
+    CHECK(ask("menu") == 7);
+    SAME(ROW(2, TITLE), "episode 2"), SAME(ROW(3, TITLE), "Episode 1");
+    SAME(ROW(4, TITLE), "Episode 10"), SAME(ROW(5, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+    unsetenv("VIDEOS_NO_BTIME");
     CHECK(!act("set\tsort"));
     CHECK(ask("menu") == 7), SAME(ROW(5, TITLE), "Episode 10");
 
@@ -597,7 +612,7 @@ static void check_actions(void) {
     row_is(5, "info", "", "Version", VERSION, "", "");
     /* a press: "ok", no message (the row changes in place) and no rows; kept on the card */
     static const char *const key[] = { "next", "subs", "subsize", "fill", "sort" };
-    static const char *const then[] = { "On", "Off", "Large", "On", "Newest First" };
+    static const char *const then[] = { "On", "Off", "Large", "On", "Recently Added" };
     for (int i = 0; i < 5; ++i) {
         CHECK(!act("set\t%s", key[i])), SAME(STATUS, "ok"), SAME(MSG, ""), SAME(CURSOR, "");
         CHECK(ask("settings") == 6), SAME(ROW(i, SUB), then[i]);

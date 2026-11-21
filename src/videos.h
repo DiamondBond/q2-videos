@@ -63,7 +63,7 @@ typedef struct {
     int subs;    /* Subtitles: 0 Off, 1 On */
     int subsize; /* Subtitle Size: 0 Small, 1 Medium, 2 Large */
     int fill;    /* Fit to Screen: 0 Off (all of the picture), 1 On (the screen filled) */
-    int sort;    /* Sort: SORT_NAME By Name, SORT_NEWEST Newest First */
+    int sort;    /* Sort: SORT_NAME By Name, SORT_NEWEST Recently Added */
 } settings_t;
 
 /* The file "settings", key=value lines (next, subs, subsize, fill, sort; the values as above).
@@ -119,6 +119,7 @@ typedef struct {
     int count;       /* a folder: the videos in it, through its subfolders */
     long long size;  /* a video: its bytes */
     long long mtime; /* a video: when it was last changed, seconds */
+    long long added; /* a video listed SORT_NEWEST: when it came to the card, nanoseconds */
 } entry_t;
 typedef struct {
     entry_t *v;  /* the folders, then the videos */
@@ -147,9 +148,9 @@ int lib_root(char *root, size_t n);
 /* root and rel joined into out ("" is root itself). 0 when rel is not rel_ok or out is short. */
 int lib_path(const char *root, const char *rel, char *out, size_t n);
 /* The folder at rel ("" the top): its subfolders that hold a video somewhere inside, in natural
- * order, each with its count; then its videos, in natural order or (SORT_NEWEST) the newest
- * first. Dot entries, and paths over REL_MAX, are left out and not counted. 0 when the folder
- * can't be read; lib_free() l either way. */
+ * order, each with its count; then its videos, in natural order or (SORT_NEWEST) the last to
+ * come to the card first. Dot entries, and paths over REL_MAX, are left out and not counted. 0
+ * when the folder can't be read; lib_free() l either way. */
 int lib_list(const char *root, const char *rel, int sort, listing_t *l);
 /* Every video under root, each named by its path from there, in natural order. 0 when root can't
  * be read (never an empty library: the caller mustn't take a pulled card for one). */

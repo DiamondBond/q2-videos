@@ -434,7 +434,7 @@ static void level(rep_t *r, const char *rel, int off) {
 static void settings_page(rep_t *r) {
     static const char *const OFF_ON[] = { "Off", "On" },
                              *const SIZE[] = { "Small", "Medium", "Large" },
-                             *const SORT[] = { "By Name", "Newest First" };
+                             *const SORT[] = { "By Name", "Recently Added" };
     settings_t s;
     settings_load(&s);
     row(r, "action", "set", "Autoplay", OFF_ON[s.next], "next", "");
