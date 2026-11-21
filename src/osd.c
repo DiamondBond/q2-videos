@@ -145,6 +145,64 @@ static void menu_draw(pix *page, const pop_t *p, const menu_t *m) {
     }
 }
 
+/* ---- Subtitles ----------------------------------------------------------------------------- */
+
+#define SUB_BOTTOM 262 /* the last line's bottom: above the bottom band, on the picture, always */
+#define SUB_SIDE 12
+#define SUB_RING 2 /* the outline, px */
+#define SUB_H                                                                                      \
+    (SUB_LINES * 18 + 2 * SUB_RING)           /* the rows they can take, the outline's with them   \
+                                               */
+#define SUB_Y (SUB_BOTTOM + SUB_RING - SUB_H) /* the first of those rows, in the view */
+
+int subs_layout(const char *text, int subsize, char lines[][LINE_N], int *px) {
+    static const int sizes[] = { 24, 20, 18, 16, 14 }, from[3] = { 3, 1, 0 };
+    int n = 0;
+    for (int i = from[subsize < 0 || subsize > 2 ? 1 : subsize]; i < 5; ++i) {
+        *px = sizes[i]; /* a fourth line asked for says whether three were enough */
+        n = text_wrap(text, *px, VIEW_W - 2 * SUB_SIDE, lines, i < 4 ? 4 : SUB_LINES);
+        if (n <= 3) break;
+    }
+    return n;
+}
+
+/* The lines as they are drawn, made once for each text: white letters in a black outline two
+ * pixels wide, so they read over any picture, a white one too. cover is how much of the page
+ * each pixel hides, white its own grey. */
+static struct {
+    char text[3 * LINE_N];
+    int size, top, x0, x1; /* the rows from top and the columns from x0 to x1 have something */
+    unsigned char cover[SUB_H * VIEW_W], white[SUB_H * VIEW_W];
+} sub = { .size = -1 };
+
+static void subs_render(const char *text, int subsize) {
+    char lines[SUB_LINES][LINE_N];
+    int px, n = subs_layout(text, subsize, lines, &px), step = px + 4;
+    snprintf(sub.text, sizeof sub.text, "%s", text), sub.size = subsize;
+    memset(sub.white, 0, sizeof sub.white), memset(sub.cover, 0, sizeof sub.cover);
+    sub.top = SUB_H - SUB_RING - px - (n - 1) * step - SUB_RING, sub.x0 = VIEW_W, sub.x1 = 0;
+    if (sub.top < 0) sub.top = 0;
+    for (int i = 0; i < n; ++i) {
+        int w = text_w(lines[i], px, 0), x = (VIEW_W - w) / 2;
+        text_mask(sub.white, VIEW_W, SUB_H, x, SUB_H - SUB_RING - px - (n - 1 - i) * step, lines[i],
+                  px);
+        if (x - 4 < sub.x0) sub.x0 = x - 4 < 0 ? 0 : x - 4; /* a letter may lean past its place */
+        if (x + w + 4 > sub.x1) sub.x1 = x + w + 4 > VIEW_W ? VIEW_W : x + w + 4;
+    }
+    for (int y = sub.top; y < SUB_H; ++y)
+        for (int x = sub.x0; x < sub.x1; ++x) {
+            unsigned ring = 0, in = sub.white[y * VIEW_W + x];
+            for (int dy = -SUB_RING; dy <= SUB_RING; ++dy) /* the most of any letter within 2 px */
+                for (int dx = -SUB_RING; dx <= SUB_RING; ++dx) {
+                    int qx = x + dx, qy = y + dy;
+                    if (abs(dx) + abs(dy) < 2 * SUB_RING && qx >= 0 && qx < VIEW_W && qy >= 0 &&
+                        qy < SUB_H && sub.white[qy * VIEW_W + qx] > ring)
+                        ring = sub.white[qy * VIEW_W + qx];
+                }
+            sub.cover[y * VIEW_W + x] = (unsigned char)(ring + in - ring * in / 255);
+        }
+}
+
 /* ---- The bands ----------------------------------------------------------------------------- */
 
 const char *time_text(long long ms, char *out, size_t n) {
@@ -210,17 +268,11 @@ void osd_draw(pix *page, const osd_t *o) {
     if (o->plain && !o->controls)
         centred(page, 151, o->title, 18, VIEW_W - 48, WHITE); /* sound alone */
     int band = o->controls || o->volume >= 0;                 /* the bottom band is up */
-    if (o->subs && *o->subs) {
-        /* Up to three lines, the last above the bottom edge or the band, each no wider than the
-         * glass's corners leave at the lowest of them. */
-        static const int sizes[3] = { 18, 22, 26 };
-        char lines[3][LINE_N];
-        int px = sizes[o->subsize < 0 || o->subsize > 2 ? 1 : o->subsize], step = px + 4;
-        int bottom = band ? BOTTOM_Y - 6 : VIEW_H - 21, side = clear_x(bottom - 3 * step, bottom);
-        int n = text_wrap(o->subs, px, VIEW_W - 2 * (side < 20 ? 20 : side), lines, 3);
-        for (int i = 0; i < n; ++i)
-            text_outlined(page, (VIEW_W - text_w(lines[i], px, 0)) / 2, bottom - (n - i) * step + 2,
-                          lines[i], px);
+    if (o->subs && *o->subs) { /* in one place, whatever else is up */
+        if (strcmp(o->subs, sub.text) || o->subsize != sub.size) subs_render(o->subs, o->subsize);
+        if (sub.x1 > sub.x0)
+            mask_over(page, sub.x0, SUB_Y + sub.top, sub.x1 - sub.x0, SUB_H - sub.top, VIEW_W,
+                      sub.cover + sub.top * VIEW_W + sub.x0, sub.white + sub.top * VIEW_W + sub.x0);
     }
     if (o->controls) {
         fill(page, 0, 0, VIEW_W, TOP_H, 0x000000, BAND);

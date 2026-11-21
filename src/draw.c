@@ -242,10 +242,34 @@ void text_at(pix *page, int x, int y, const char *s, int px, int track, pix rgb,
     }
 }
 
-void text_outlined(pix *page, int x, int y, const char *s, int px) {
-    for (int i = 0; i < 9; ++i)
-        if (i != 4) text_at(page, x + i % 3 - 1, y + i / 3 - 1, s, px, 0, 0x000000, 255);
-    text_at(page, x, y, s, px, 0, 0xffffff, 255);
+void text_mask(unsigned char *mask, int w, int h, int x, int y, const char *s, int px) {
+    if (!font_ok) return;
+    float pen = (float)x, sc = stbtt_ScaleForPixelHeight(&font, (float)px);
+    int base = y + (int)((float)font_up * sc + 0.5f);
+    for (unsigned cp; (cp = utf8_next(&s));) {
+        const glyph_t *g = glyph(cp, px);
+        int gx = (int)floorf(pen + 0.5f) + g->x0, gy = base + g->y0;
+        for (int k = 0; k < g->h; ++k)
+            for (int i = 0; i < g->w; ++i) {
+                int mx = gx + i, my = gy + k;
+                if (mx >= 0 && mx < w && my >= 0 && my < h &&
+                    g->bits[k * g->w + i] > mask[my * w + mx])
+                    mask[my * w + mx] = g->bits[k * g->w + i];
+            }
+        pen += g->advance;
+    }
+}
+
+void mask_over(pix *page, int x, int y, int w, int h, int line, const unsigned char *cover,
+               const unsigned char *white) {
+    for (int i = 0; i < w; ++i) /* a column of the view: the page's memory in order */
+        for (int k = h - 1; k >= 0; --k) {
+            unsigned a = cover[k * line + i];
+            if (!a || x + i < 0 || x + i >= VIEW_W || y + k < 0 || y + k >= VIEW_H) continue;
+            pix *d = view_at(page, x + i, y + k);
+            /* white is never more than cover leaves room for: no channel runs over */
+            blend(d, 0x000000, a), *d += white[k * line + i] * 0x010101u;
+        }
 }
 
 #define DOTS "\xe2\x80\xa6" /* … */

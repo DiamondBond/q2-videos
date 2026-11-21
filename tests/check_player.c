@@ -232,6 +232,33 @@ static void check_draw(void) {
     n = text_wrap("a\nb\nc\nd", 22, 150, lines, 3);
     CHECK(n == 3), SAME(lines[2], "c\xe2\x80\xa6");
 
+    /* subtitles: the size chosen; smaller for a cue that takes more than three lines, until it
+     * takes three; at 14 as many as it takes, and nothing of it is left out */
+    char sub[SUB_LINES][LINE_N];
+    int px;
+    CHECK(subs_layout("Hello", 0, sub, &px) == 1 && px == 16);
+    CHECK(subs_layout("Hello", 1, sub, &px) == 1 && px == 20);
+    CHECK(subs_layout("Hello", 2, sub, &px) == 1 && px == 24);
+    CHECK(subs_layout("Hello", 7, sub, &px) == 1 && px == 20);
+    const char *four = "I thought you said the meeting was tomorrow, not today, and that we had "
+                       "all the time in the world to get ready for it.";
+    CHECK(text_wrap(four, 24, 351, sub, 4) == 4 && text_wrap(four, 20, 351, sub, 4) == 3);
+    CHECK(subs_layout(four, 2, sub, &px) == 3 && px == 20);
+    CHECK(subs_layout(four, 1, sub, &px) == 3 && px == 20);
+    CHECK(subs_layout(four, 0, sub, &px) <= 3 && px == 16);
+    char many[400] = "", back[400] = "";
+    for (int i = 0; i < 3; ++i) sprintf(many + strlen(many), "%s%s", i ? " " : "", four);
+    n = subs_layout(many, 2, sub, &px);
+    CHECK(px == 14 && n > 4 && n <= SUB_LINES);
+    for (int i = 0; i < n; ++i) {
+        CHECK(text_w(sub[i], 14, 0) <= 351);
+        sprintf(back + strlen(back), "%s%s", i ? " " : "", sub[i]);
+    }
+    SAME(back, many); /* all of it */
+    CHECK(subs_layout("One\nTwo\nThree\nFour\nFive", 2, sub, &px) == 5 && px == 14);
+    SAME(sub[4], "Five");
+    CHECK(subs_layout("One\nTwo\nThree\nFour", 0, sub, &px) == 4 && px == 14);
+
     /* drawing stays on the page whatever it is asked: ASan watches the rows around it */
     pix *page = malloc(PAGE_PX * sizeof *page);
     memset(page, 0, PAGE_PX * sizeof *page);
@@ -248,7 +275,27 @@ static void check_draw(void) {
     CHECK(*view_at(page, 300, 150) == 0xffffff00u);
     text_at(page, -30, -5, "Clipped at the corner", 26, 0, 0xffffff, 255),
         text_at(page, 350, 310, "and at the other", 26, 3, 0xffffff, 255);
-    text_outlined(page, 370, 0, "\xe6\x97\xa5\xe6\x9c\xac", 26);
+    unsigned char mask[40 * 30] = { 0 };
+    text_mask(mask, 40, 30, 30, -5, "\xe6\x97\xa5\xe6\x9c\xac", 26); /* and on the mask */
+    mask_over(page, 360, -10, 40, 30, 40, mask, mask),
+        mask_over(page, -20, 305, 40, 30, 40, mask, mask);
+    /* a subtitle on a white picture: white letters in a black outline two pixels wide, their
+     * last line's bottom at y 262, nothing of them under y 264 */
+    for (int i = 0; i < PAGE_PX; ++i) page[i] = 0xffffffffu;
+    osd_draw(page, &(osd_t){ .volume = -1, .subs = "l", .subsize = 1 });
+    int first = -1, dark = -1, letter = -1;
+    for (int x = 0; x < VIEW_W && letter < 0; ++x) {
+        pix c = *view_at(page, x, 252);
+        CHECK((c >> 16 & 0xff) == (c & 0xff) && (c >> 8 & 0xff) == (c & 0xff)); /* a grey */
+        if (first < 0 && c != 0xffffffffu) first = x;
+        if (dark < 0 && (c & 0xff) < 60) dark = x;
+        if (dark >= 0 && (c & 0xff) > 200) letter = x;
+    }
+    CHECK(first > 150 && letter - first >= 2 && letter - first <= 3 && letter < 200);
+    for (int x = 0; x < VIEW_W; ++x)
+        for (int y = 0; y < VIEW_H; ++y)
+            if (y < 240 || y > 264) CHECK(*view_at(page, x, y) == 0xffffffffu);
+    CHECK(*view_at(page, letter, 257) != 0xffffffffu && *view_at(page, letter, 247) != 0xffffffffu);
     /* a box's corners are round: its own corner pixel is left, its middle is filled */
     memset(page, 0, PAGE_PX * sizeof *page);
     rbox(page, 100, 100, 80, 40, 12, 0xffffff, 255, 0);
@@ -1210,7 +1257,7 @@ static void run_subs(void) {
          0);
     CHECK(says("nsubs=1 nside=0 chapters=0 sub=0") && !num("a", "sub"));
     SAME(lines("a"), "Hello");
-    CHECK(ink("a", 100, 266, 274, 305) > 100); /* drawn, under the picture */
+    CHECK(!ink("a", 0, 266, 374, 319)); /* on the picture, nothing under it */
     CHECK(num("list", "menu") == 3 &&
           num("list", "sel") == 1); /* Off, English: on the one that is on */
     CHECK(num("off", "sub") == -1 && !num("off", "menu") && !ink("off", 0, 266, 374, 319));
@@ -1261,18 +1308,29 @@ static void run_subs(void) {
     SAME(lines("a"),
          "Caf\xe9 d\xe9j\xe0 vu"); /* é and à as Latin-1's one byte each, drawn as such */
 
-    /* the three sizes, and above the controls when they are up */
+    /* the three sizes, over a black page (sound alone), where the ink is theirs; and in one
+     * place, the last line's bottom at y 262, whether the controls are up or not */
     int n[3];
+    videos("audio-only.mp4");
+    put("Videos/audio-only.srt", "1\n00:00:00,500 --> 00:00:03,000\nOne row\n\n"
+                                 "2\n00:00:03,500 --> 00:00:06,000\nOne\nTwo\nThree\nFour\nFive\n");
     for (int i = 0; i < 3; ++i) {
         char set[32];
         snprintf(set, sizeof set, "subsize=%d\n", i);
         put(".videos/settings", set);
-        marked("sidecar.mp4", 0, 10022, 0, -1, 1);
-        play("size", "sidecar.mp4", "4500 shot a\n4600 tap 60 100\n4700 shot b\n5000 key 170\n",
-             0);                                          /* a line of one row */
-        n[i] = ink("a", 0, 266, 374, 319);                /* under the picture */
-        CHECK(n[i] > 100 && !ink("b", 0, 266, 374, 279)); /* and none there with the band up */
+        play("size", "audio-only.mp4",
+             "1000 shot a\n1100 tap 60 100\n1200 shot b\n4500 shot c\n4600 key 170\n", 0);
+        n[i] = ink("a", 0, 200, 374, 264);
+        SAME(lines("a"), "One row");
+        CHECK(n[i] > 100 && !ink("a", 0, 265, 374, 319) && num("b", "controls") == 1 &&
+              ink("b", 0, 200, 374, 264) == n[i] &&
+              ink("a", 0, 262 - 16 - 4 * i, 374, 262) == n[i]);
+        /* five lines are five lines at any size, the smallest: none of them is left out */
+        SAME(lines("c"), "One|Two|Three|Four|Five");
+        CHECK(ink("c", 0, 176, 374, 190) > 30 && ink("c", 0, 248, 374, 262) > 30 &&
+              !ink("c", 0, 265, 374, 319) && !ink("c", 0, 170, 374, 173));
     }
+    put(".videos/settings", "");
     CHECK(n[1] > n[0] * 5 / 4 && n[2] > n[1] * 5 / 4);
 }
 

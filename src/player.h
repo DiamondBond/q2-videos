@@ -46,8 +46,13 @@ unsigned utf8_next(const char **s); /* the code point at *s, which moves past it
 int text_w(const char *s, int px, int track);
 /* s with its top left at (x, y): the line is px high. */
 void text_at(pix *page, int x, int y, const char *s, int px, int track, pix rgb, int alpha);
-/* The same, white inside a 1 px black outline: readable over any picture. */
-void text_outlined(pix *page, int x, int y, const char *s, int px);
+/* The letters' coverage, 0 to 255, into mask (w x h bytes) with s's top left at (x, y) of it:
+ * where letters meet, the larger stays. */
+void text_mask(unsigned char *mask, int w, int h, int x, int y, const char *s, int px);
+/* A w x h picture of greys onto the page at (x, y), line bytes a row: each pixel covers the page
+ * by cover of 255 and is white of 255 over black, white no more than cover. */
+void mask_over(pix *page, int x, int y, int w, int h, int line, const unsigned char *cover,
+               const unsigned char *white);
 /* s into out (n bytes) as it fits in w px: whole, or cut at a letter with an ellipsis. */
 const char *text_fit(const char *s, int px, int track, int w, char *out, size_t n);
 /* s into at most max lines no wider than w: its own line ends are kept, a longer line breaks at a
@@ -289,6 +294,12 @@ typedef struct { /* what is drawn over the picture */
     const char *message, *reason; /* a whole screen: "Loading…", or why it can't be played */
     int plain;                    /* no picture under it: a black page */
 } osd_t;
+/* Subtitles into lines, each no wider than the view less 12 px a side, and the size they are
+ * drawn at: Small 16, Medium 20, Large 24, and smaller (18, 16, 14) for a cue that takes more
+ * than three lines, until it does; at 14 as many as it takes (SUB_LINES at most). Returns the
+ * lines. Nothing of a cue is left out. */
+#define SUB_LINES 12 /* what the picture holds between the bands, at 14 px */
+int subs_layout(const char *text, int subsize, char lines[][LINE_N], int *px);
 /* 1 when o draws anything: else the picture goes to the screen as it is. */
 int osd_any(const osd_t *o);
 void osd_draw(pix *page, const osd_t *o);
