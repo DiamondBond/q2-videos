@@ -262,7 +262,7 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
         AVCodec *codec = avcodec_find_decoder(par->codec_id);
         if (par->width > 0 && par->height > 0 && par->width <= SIDE_MAX && par->height <= SIDE_MAX)
             t->w = par->width, t->h = par->height;
-        if (t->w && codec && !too_large(t->w, t->h, mem_available()) &&
+        if (t->w && codec && !too_large(t->w, t->h, pix_bits(par->format), mem_available()) &&
             (c = avcodec_alloc_context3(codec)) && avcodec_parameters_to_context(c, par) >= 0) {
             c->thread_count = 1;
             /* a picture that grows far past the size the file gave, and was let through on, is

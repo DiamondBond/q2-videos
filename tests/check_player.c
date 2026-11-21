@@ -341,8 +341,8 @@ static void check_picture(void) {
     corners(375, 320, 0, &a, &b, &c, &d), CHECK(a == 0xffff0000u && c == 0xff0000ffu);
     corners(320, 375, 270, &a, &b, &c, &d), CHECK(d == 0xffff0000u && b == 0xff0000ffu);
 
-    CHECK(too_large(1920, 1080, 20000) && !too_large(1280, 720, 20000) &&
-          !too_large(1920, 1080, 60000));
+    CHECK(too_large(1920, 1080, 12, 20000) && !too_large(1280, 720, 12, 20000) &&
+          !too_large(1920, 1080, 12, 60000));
 
     /* falling behind: three late frames step down the quality, to the keyframe skip at most, a
      * step no sooner than half a second after the last: a hiccup of nine late frames is one */
@@ -1422,7 +1422,7 @@ static int follows(const char *path) {
 
 /* What can't be played says why, on a screen of its own, until a key or ten seconds. */
 static void run_refused(void) {
-    videos("big-1080p.mp4,av1.mkv,h264-aac.mp4,sidecar.srt=notes.mp4");
+    videos("big-1080p.mp4,av1.mkv,h264-aac.mp4,sidecar.srt=notes.mp4,tenbit.mkv,grow.ts");
     play("too-large", "big-1080p.mp4", "500 shot a\n9900 shot b\n10600 shot never\n",
          "VIDEOS_MEM_KB=20000");
     CHECK(says(
@@ -1432,6 +1432,26 @@ static void run_refused(void) {
     CHECK(ink("a", 24, 100, 350, 220) > 1000 &&
           ink("a", 0, 0, 374, 319) == ink("a", 24, 100, 350, 220)); /* said, within the screen */
     CHECK(mark_of("big-1080p.mp4").audio == -9 && !says("save "));  /* and no mark is made of it */
+    /* the memory counted is ten frames and 8 MB that the player holds besides: 1080p's 30 MB of
+     * them at 12 bits a pixel, and twice that where a pixel is stored in 10 bits */
+    play("large-8", "big-1080p.mp4", "500 shot a\n600 key 218\n", "VIDEOS_MEM_KB=38500");
+    CHECK(num("a", "state") == ENG_FAILED && says("fail 1920 × 1080 is too large"));
+    play("fits-8", "big-1080p.mp4", "500 shot a\n600 key 170\n", "VIDEOS_MEM_KB=38600");
+    CHECK(num("a", "state") == ENG_READY && num("a", "pic") >= 0);
+    play("large-10", "tenbit.mkv", "500 shot a\n600 key 218\n", "VIDEOS_MEM_KB=68900");
+    CHECK(num("a", "state") == ENG_FAILED && says("fail 1920 × 1080 is too large"));
+    play("fits-10", "tenbit.mkv", "500 shot a\n600 key 170\n", "VIDEOS_MEM_KB=69000");
+    CHECK(num("a", "state") == ENG_READY && num("a", "pic") >= 0);
+    /* a stream that is small and then large is weighed again where it grows: it stops there
+     * and says so, the place saved */
+    play("grow", "grow.ts", "2000 shot a\n4000 shot b\n", "VIDEOS_MEM_KB=30000");
+    CHECK(num("a", "state") == ENG_READY && num("a", "pic") > 1900 &&
+          num("b", "state") == ENG_FAILED);
+    CHECK(says("save pos=0 watched=0\nfail 1920 × 1080 is too large for the Q2's memory.") &&
+          says("end grow.ts quit"));
+    play("grow-fits", "grow.ts", "2000 shot a\n4000 shot b\n", "VIDEOS_MEM_KB=40000");
+    CHECK(num("b", "state") == ENG_READY && num("b", "pic") > 3900 && says("end grow.ts over"));
+    SAME(geom("a"), geom("b")); /* 16:9 before and after */
     play("no-decoder", "av1.mkv", "500 shot a\n600 key 218\n", 0);
     CHECK(says("fail The Q2 has no decoder for AV1 video.\n") && says("end av1.mkv quit"));
     play("text", "notes.mp4", "500 shot a\n600 key 218\n", 0);
@@ -1525,6 +1545,26 @@ static void run_awake(int device) {
     CHECK(num("a", "t") == 50001000 && num("a", "pos") == 1000 && num("b", "pos") == 3000 &&
           num("b", "pic") == 3000);
     NEAR(num("b", "frames"), 3000 * 48, RATE / 5), NEAR(num("b", "tone"), 880, 15);
+}
+
+/* A picture the decoder can't keep up with (each one made slower, on the real clock; the
+ * script's clock waits for every thread, so nothing is ever late on it), in a stream whose every
+ * picture is a keyframe and whose 24 Mbit/s fill the reader's queue in under two seconds. The
+ * sound is never held up by it: what the reader holds of picture that is behind goes undecoded.
+ * And the picture stays near the sound, a slideshow. */
+static void run_behind(void) {
+    static const char *const at[] = { "a", "b", "c", "d" };
+    videos("intra.mkv");
+    play("behind", "intra.mkv",
+         "1000 shot a\n2000 shot b\n3000 shot c\n4000 shot d\n4200 key 170\n",
+         "VIDEOS_CLOCK=real\nVIDEOS_SLOW=150");
+    for (int i = 0; i < 4; ++i) {
+        CHECK(num(at[i], "pos") - num(at[i], "pic") < 1200); /* no further behind than that */
+        if (i) CHECK(num(at[i], "pic") > num(at[i - 1], "pic"));
+    }
+    /* three seconds of sound in three seconds, the place with it */
+    NEAR(num("d", "frames") - num("a", "frames"), 3000 * 48, RATE / 4);
+    NEAR(num("d", "pos") - num("a", "pos"), 3000, 150), NEAR(num("d", "tone"), 880, 15);
 }
 
 /* Two recordings of forty seconds end to end in one transport stream: twice as long as its
@@ -1786,6 +1826,7 @@ int main(int argc, char **argv) {
     run_awake(0);
     run_files();
     run_spliced();
+    run_behind();
     run_term();
     run_lock();
     check_wake();

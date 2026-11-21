@@ -47,10 +47,13 @@ long long mono_ms(void);
 
 /* /proc/meminfo's MemAvailable, kB; 0 unknown. */
 unsigned mem_available(void);
-/* 1 when decoding a w x h picture would hold more than avail_kb in frames alone (10 of them at
- * 12 bits a pixel): the Q2 has 128 MB and no swap, and stalls until the kernel kills us. An
+/* 1 when decoding a w x h picture stored at bits a pixel would hold more than avail_kb in frames
+ * alone (10 of them): the Q2 has 128 MB and no swap, and stalls until the kernel kills us. An
  * unknown size or avail_kb (0) is never too large. */
-int too_large(int w, int h, unsigned avail_kb);
+int too_large(int w, int h, int bits, unsigned avail_kb);
+/* The bits a pixel is stored in, in a decoder's frame of that libavutil format: 12 for 8-bit
+ * 4:2:0, 24 for 10-bit (two bytes a sample), 48 for 10-bit 4:4:4; 12 when it is not known. */
+int pix_bits(int format);
 
 /* The video at path opened, for the thumbnails and the player alike: as one of FORMATS or not at
  * all, and nothing but files for whatever it names in turn, so a playlist or a script named .mp4

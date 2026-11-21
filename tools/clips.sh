@@ -130,6 +130,16 @@ ff -i "$T/big.mkv" -f lavfi -i "$(tone)" -c:v copy -c:a aac -ac 2 "$OUT/big-1080
 x264 fast "$(pic 640x360 60)"
 ff -i "$T/fast.mkv" -f lavfi -i "$(tone)" -c:v copy -c:a aac -ac 2 "$OUT/60fps.mp4"
 
+# 1080p stored in 10 bits: twice the memory a frame
+x264 tenbit "$(pic 1920x1080 25 1)" -pix_fmt yuv420p10le
+ff -i "$T/tenbit.mkv" -f lavfi -i "$(tone 440 48000 1)" -c:v copy -c:a aac -ac 2 "$OUT/tenbit.mkv"
+
+# Every picture a keyframe, at 24 Mbit/s: nothing a decoder that is behind can skip, and the
+# reader's queue full in under two seconds
+x264 intra "$(pic 640x360 25 4.5),noise=alls=40:allf=t+u" -g 1 -b:v 24000k -minrate 24000k \
+    -maxrate 24000k -bufsize 24000k
+ff -i "$T/intra.mkv" -f lavfi -i "$(tone 440 48000 4.5)" -c:v copy -c:a aac -ac 2 "$OUT/intra.mkv"
+
 # ASS subtitles with override tags, a line break and a hard space
 cat >"$T/subs.ass" <<'EOF'
 [Script Info]
@@ -171,6 +181,12 @@ cat "$OUT/offset.ts" "$OUT/offset.ts" >"$OUT/jump.ts"
 ff -t 40 -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 40)" -c:v copy -c:a mp2 -ac 2 \
     -f mpegts "$T/part.ts"
 cat "$T/part.ts" "$T/part.ts" >"$OUT/twice.ts"
+# And one that is small and then 1080p: a stream that grows on the way
+ff -t 3 -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 3)" -c:v copy -c:a mp2 -ac 2 \
+    -f mpegts "$T/small.ts"
+ff -t 2 -i "$T/big.mkv" -f lavfi -i "$(tone 440 48000 2)" -c:v copy -c:a mp2 -ac 2 \
+    -f mpegts "$T/large.ts"
+cat "$T/small.ts" "$T/large.ts" >"$OUT/grow.ts"
 
 # A transport stream's timestamps are 33 bits of a 90 kHz clock: this one's run out and start
 # again from nothing under three seconds in

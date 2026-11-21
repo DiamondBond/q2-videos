@@ -34,10 +34,14 @@ static void check_common(void) {
     CHECK(a >= 0 && b >= 0);
     close(a), close(b);
 
-    CHECK(too_large(1920, 1080, 30374) && !too_large(1920, 1080, 30375)); /* 10 frames, 12 bpp */
-    CHECK(!too_large(640, 360, 3375) && too_large(640, 360, 3374));
-    CHECK(!too_large(0, 1080, 1) && !too_large(1920, -1, 1) && !too_large(7680, 4320, 0));
-    CHECK(too_large(32768, 32768, 4000000u)); /* no overflow on the way */
+    /* 10 frames, at 12 bits a pixel for 8-bit 4:2:0 and twice that for 10-bit */
+    CHECK(too_large(1920, 1080, 12, 30374) && !too_large(1920, 1080, 12, 30375));
+    CHECK(too_large(1920, 1080, 24, 60749) && !too_large(1920, 1080, 24, 60750));
+    CHECK(!too_large(640, 360, 12, 3375) && too_large(640, 360, 12, 3374));
+    CHECK(!too_large(0, 1080, 12, 1) && !too_large(1920, -1, 12, 1) &&
+          !too_large(7680, 4320, 12, 0));
+    CHECK(too_large(32768, 32768, 48, 4000000u));   /* no overflow on the way */
+    CHECK(pix_bits(0) == 12 && pix_bits(-1) == 12); /* AV_PIX_FMT_YUV420P; one not known */
 }
 
 /* ---- Settings ------------------------------------------------------------------------------ */

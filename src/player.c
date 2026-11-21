@@ -589,7 +589,7 @@ static void input(const event_t *e, long long now) {
         return;
     }
     if (e->kind == 's') V.shot = e->arg;
-    if (e->kind == 'f') eng_test(0, e->arg);
+    if (e->kind == 'f') eng_test(0, e->arg, 0);
     if (e->kind != 'k' && e->kind != 't' && e->kind != 'w') return;
     V.input_at = now;
     if (P.dim) unlink(P.dim_path), P.dim = 0; /* any input brings the panel back */
@@ -836,6 +836,7 @@ static int play(const char *rel) {
         if (V.state != was) { /* it opened, or can't be */
             if (V.state == ENG_READY) opened(now);
             if (V.state == ENG_FAILED) {
+                if (was == ENG_READY) place_save(now, 300); /* it stopped midway: from there */
                 if (!V.why) V.why = eng_why();
                 V.error_until = now + ERROR_MS;
                 say("fail %s", V.why);
@@ -915,7 +916,7 @@ int player_main(int argc, char **argv) {
     volume_ask("?");
     if (P.plat == &plat_script)
         eng_test((unsigned)atoi(getenv("VIDEOS_MEM_KB") ? getenv("VIDEOS_MEM_KB") : "0"),
-                 getenv("VIDEOS_SINK"));
+                 getenv("VIDEOS_SINK"), atoi(getenv("VIDEOS_SLOW") ? getenv("VIDEOS_SLOW") : "0"));
 
     snprintf(next, sizeof next, "%s", rel);
     /* a video played out is followed by the next in its folder, when Play Next says so */

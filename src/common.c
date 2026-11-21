@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <libavformat/avformat.h>
+#include <libavutil/pixdesc.h>
 
 #define FILE_MAX (8u << 20) /* file_get's most: nothing the app reads whole is near it */
 #define FRAMES_HELD 10      /* frames a decode holds at once, at most (too_large) */
@@ -89,9 +90,14 @@ unsigned mem_available(void) {
  * 4 frames' worth (one reference, no B-frames) to 10 (three references and B-frames, or HEVC).
  * A video that starts and then stalls the Q2 means raising it; one refused that would play,
  * lowering it. */
-int too_large(int w, int h, unsigned avail_kb) {
-    return w > 0 && h > 0 && avail_kb &&
-           (long long)w * h / 1024 * 3 * FRAMES_HELD / 2 > avail_kb; /* /1024 first: no overflow */
+int too_large(int w, int h, int bits, unsigned avail_kb) {
+    return w > 0 && h > 0 && avail_kb && /* /1024 first: no overflow */
+           (long long)w * h / 1024 * bits * FRAMES_HELD / 8 > avail_kb;
+}
+
+int pix_bits(int format) {
+    const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(format);
+    return d ? av_get_padded_bits_per_pixel(d) : 12;
 }
 
 long long mono_ms(void) {

@@ -47,15 +47,20 @@
 #define RING (RATE / 5)       /* the silent output holds 200 ms, as ALSA's buffer does */
 #define HIST (RATE / 2)       /* frames kept to write again after a pause */
 #define STALL_MS 3000         /* a write held this long: the output takes no sound */
-#define TOL 50000             /* us a sound frame's time may be off its place and still join on */
-#define OVERLAP_MAX 5000000   /* sound this far before its place is cut; more is a jump back */
-#define ECUES 64              /* the file's own subtitle cues kept */
+#define LATE_US 500000 /* a picture's packet this long due and not yet decoded: it is behind */
+#define LEAD_US 200000 /* a keyframe this far ahead of the clock can still be decoded in time */
+#define SHOW_MS 500    /* of late pictures, one goes up this often all the same */
+#define HELD_KB 8192   /* what the player holds besides a decoder's frames (too_large) */
+#define TOL 50000      /* us a sound frame's time may be off its place and still join on */
+#define OVERLAP_MAX 5000000 /* sound this far before its place is cut; more is a jump back */
+#define ECUES 64            /* the file's own subtitle cues kept */
 #define NONE INT64_MIN
 
 typedef struct node {
     struct node *next;
     AVPacket *pkt; /* 0: the stream's end */
     int serial;
+    int cut; /* what was before it in the stream went undecoded: the decoder starts afresh */
 } node_t;
 typedef struct {
     node_t *head, **tail;
@@ -154,6 +159,7 @@ static struct {
     int skip_serial;
     int eof;
     pq_t vq, aq;
+    int vskip; /* the queued picture was dropped whole: the reader passes on to the next keyframe */
 
     /* pictures: the video thread fills pic[(ridx + count) % PICS], the main thread takes pic[ridx]
      */
@@ -184,6 +190,7 @@ static struct {
     int tone, level;
     unsigned mem_kb;
     int fault, checked; /* checked: a script runs this, and reads the tone */
+    int slow_ms;        /* the script's: each picture takes this much longer to decode */
 } E = { .lock = PTHREAD_MUTEX_INITIALIZER };
 enum { FAULT_NONE, FAULT_STALL, FAULT_LOST, FAULT_GONE };
 
@@ -269,7 +276,8 @@ int clock_wait(long long until) {
 
 /* ---- Queues -------------------------------------------------------------------------------- */
 
-static void pq_put(pq_t *q, AVPacket *pkt, int serial) { /* pkt's data moves into the queue */
+/* pkt's data moves into the queue */
+static void pq_put(pq_t *q, AVPacket *pkt, int serial, int cut) {
     node_t *n = calloc(1, sizeof *n);
     if (n && pkt && !(n->pkt = av_packet_alloc())) free(n), n = 0;
     if (!n) {
@@ -277,7 +285,7 @@ static void pq_put(pq_t *q, AVPacket *pkt, int serial) { /* pkt's data moves int
         return;
     }
     if (pkt) av_packet_move_ref(n->pkt, pkt), q->bytes += n->pkt->size + 256;
-    n->serial = serial;
+    n->serial = serial, n->cut = cut;
     if (!q->head) q->tail = &q->head;
     *q->tail = n, q->tail = &n->next;
     ++q->n;
@@ -320,7 +328,49 @@ static int clock_read(long long now, long long *us) {
     return 1;
 }
 
+/* The lock held. The picture is behind: its next packet is due and not yet decoded. Queued
+ * picture then goes undecoded, up to the first keyframe the decoder can still be in time for
+ * (else the newest), in two cases, and the decoder comes out ahead of the clock; where every
+ * picture is a keyframe, that is a slideshow.
+ *
+ * starving: the sound has nothing left to play and the reader is at its limit of bytes, so what
+ * it holds is picture the decoder hasn't got to and the sound's packets beyond can't be read.
+ * The sound would stop for the picture; any picture that is due goes instead, all of it when no
+ * keyframe is queued (the reader then passes on to the next), and the reader reads on.
+ *
+ * Else: the next picture is LATE_US behind, so decoding on would only make pictures to drop.
+ * Only to a keyframe that is queued: with none, falling behind is the ladder's to deal with.
+ * 1 when anything went. */
+static int shed(int starving) {
+    node_t *head = E.vq.head, *to = 0, *newest = 0;
+    long long c;
+    if (!head || !head->pkt || E.paused || !clock_read(now_ms(), &c) ||
+        (starving && E.vq.bytes + E.aq.bytes < QUEUE_BYTES))
+        return 0;
+    AVRational tb = E.ic->streams[E.vi]->time_base;
+    long long at = head->pkt->dts != AV_NOPTS_VALUE ? head->pkt->dts : head->pkt->pts;
+    if (at == AV_NOPTS_VALUE || av_rescale_q(at, tb, AV_TIME_BASE_Q) > c - (starving ? 0 : LATE_US))
+        return 0;
+    for (node_t *n = head->next; n && n->pkt && !to; n = n->next)
+        if (n->pkt->flags & AV_PKT_FLAG_KEY) {
+            at = n->pkt->dts != AV_NOPTS_VALUE ? n->pkt->dts : n->pkt->pts;
+            newest = n;
+            if (at != AV_NOPTS_VALUE && av_rescale_q(at, tb, AV_TIME_BASE_Q) >= c + LEAD_US) to = n;
+        }
+    if (!to) to = newest;
+    if (!to && !starving) return 0;
+    while (E.vq.head && E.vq.head != to && E.vq.head->pkt) node_free(pq_get(&E.vq));
+    if (to)
+        to->cut = 1;
+    else
+        E.vskip = 1;
+    kick();
+    return 1;
+}
+
 /* ---- The reader ---------------------------------------------------------------------------- */
+
+#define TOO_LARGE "%d \xc3\x97 %d is too large for the Q2's memory. Convert it to 720p or smaller."
 
 static int interrupted(void *unused) { return E.quit; }
 
@@ -410,11 +460,14 @@ static int media_open(void) {
     if (E.vi >= 0) {
         AVStream *st = ic->streams[E.vi];
         AVRational rate = av_guess_frame_rate(ic, st, 0);
+        unsigned kb = E.mem_kb ? E.mem_kb : mem_available();
         E.m.w = st->codecpar->width, E.m.h = st->codecpar->height;
-        if (too_large(E.m.w, E.m.h, E.mem_kb ? E.mem_kb : mem_available()))
-            return fail(
-                "%d \xc3\x97 %d is too large for the Q2's memory. Convert it to 720p or smaller.",
-                E.m.w, E.m.h);
+        /* the decoder's frames, and what the player holds besides: none of that is there yet */
+        if (too_large(E.m.w, E.m.h, pix_bits(st->codecpar->format),
+                      kb > HELD_KB ? kb - HELD_KB
+                      : kb         ? 1
+                                   : 0))
+            return fail(TOO_LARGE, E.m.w, E.m.h);
         E.vdec = avcodec_alloc_context3(vc);
         if (!E.vdec || avcodec_parameters_to_context(E.vdec, st->codecpar) < 0)
             return fail("The Q2 is out of memory.");
@@ -536,7 +589,7 @@ static void *reader_main(void *unused) {
     worker_t *w = &E.reader;
     AVCodecContext *sdec = 0;
     AVPacket *pkt = av_packet_alloc();
-    int si = -1, aswitch = 0, serial = 0, want_key, keyless = 0;
+    int si = -1, aswitch = 0, serial = 0, want_key, keyless = 0, cut = 0;
     long long ahead = NONE, ahead_to = 0; /* a seek ahead's: the place to get past, and its own */
     long long off = 0, vnext = NONE, anext = NONE, place = NONE; /* joined()'s */
     long long read_ms = 0; /* how far into the video the packets read reach */
@@ -550,7 +603,7 @@ static void *reader_main(void *unused) {
         if (E.seek.pending) { /* to another place: what was read for this one goes */
             int how = E.seek.how;
             long long us = E.start_us + E.seek.ms * 1000, skip = how == SEEK_EXACT ? us : NONE;
-            serial = E.serial, E.seek.pending = 0, E.eof = 0;
+            serial = E.serial, E.seek.pending = 0, E.eof = 0, E.vskip = cut = 0;
             pq_flush(&E.vq), pq_flush(&E.aq);
             memset(E.cue, 0, sizeof E.cue);
             /* where its timestamps start again a time is no one place: by bytes then, as far
@@ -585,7 +638,7 @@ static void *reader_main(void *unused) {
             E.ic->streams[E.ai]->discard = AVDISCARD_DEFAULT;
             anext = NONE;
             pq_flush(&E.aq);
-            if (E.eof) pq_put(&E.aq, 0, serial); /* nothing more is read: it ends at once */
+            if (E.eof) pq_put(&E.aq, 0, serial, 0); /* nothing more is read: it ends at once */
             E.adone = 0, E.aswitched = aswitch;
             kick();
             continue;
@@ -611,6 +664,7 @@ static void *reader_main(void *unused) {
             lock();
             continue;
         }
+        if (E.vskip) E.vskip = 0, want_key = cut = 1, keyless = 0;
         if (E.eof || capped()) {
             wait_for(w, 0);
             continue;
@@ -622,8 +676,8 @@ static void *reader_main(void *unused) {
         if (r < 0) { /* the end, or a tail that can't be read: the same */
             if (E.dur_ms && read_ms > E.dur_ms) E.dur_ms = read_ms; /* and now it is known */
             E.eof = 1;
-            if (E.vi >= 0) pq_put(&E.vq, 0, serial);
-            if (E.ai >= 0) pq_put(&E.aq, 0, serial);
+            if (E.vi >= 0) pq_put(&E.vq, 0, serial, 0);
+            if (E.ai >= 0) pq_put(&E.aq, 0, serial, 0);
             kick(), notify();
             continue;
         }
@@ -670,11 +724,11 @@ static void *reader_main(void *unused) {
                 continue;
             }
             ahead = NONE, want_key = 0;
-            pq_put(&E.vq, pkt, serial), kick();
+            pq_put(&E.vq, pkt, serial, cut), cut = 0, kick();
         } else if (ahead != NONE) /* nothing is taken before the picture's keyframe is known */
             av_packet_unref(pkt);
         else if (pkt->stream_index == E.ai)
-            pq_put(&E.aq, pkt, serial), kick();
+            pq_put(&E.aq, pkt, serial, 0), kick();
         else if (pkt->stream_index == si && sdec) {
             unlock();
             subtitle(sdec, E.ic->streams[si], pkt, serial);
@@ -701,15 +755,16 @@ static void *video_main(void *unused) {
     geom_t g = { 0 };
     ladder_t lad = { 0 };
     int serial = -1, first = 1, count = 0, fw = 0, fh = 0, ffmt = -1, ffill = -1, laddered = 0;
-    long long last = NONE;
+    long long last = NONE, up = 0, weighed = 0; /* up: when a picture last went out */
     lock();
     while (!E.quit && f && img) {
         if (E.state != ENG_READY || E.vi < 0 || !E.vq.head) {
             wait_for(w, 0);
             continue;
         }
+        shed(0); /* far behind: on to a keyframe that is queued */
         node_t *n = pq_get(&E.vq);
-        int now_serial = E.serial, end = !n->pkt;
+        int now_serial = E.serial, end = !n->pkt, cut = n->cut;
         kick(); /* room for the reader */
         unlock();
         if (n->serial != now_serial) { /* read before a seek */
@@ -721,7 +776,8 @@ static void *video_main(void *unused) {
         if (n->serial != serial) { /* the first of another place */
             avcodec_flush_buffers(E.vdec);
             serial = n->serial, first = 1, count = 0, last = NONE, lad.late = 0;
-        }
+        } else if (cut) /* what was queued before it was dropped (shed) */
+            avcodec_flush_buffers(E.vdec), last = NONE;
         E.vdec->skip_loop_filter = lad.level >= 1 ? AVDISCARD_ALL : AVDISCARD_DEFAULT;
         E.vdec->skip_frame = lad.level >= 3   ? AVDISCARD_NONKEY
                              : lad.level == 2 ? AVDISCARD_NONREF
@@ -731,6 +787,7 @@ static void *video_main(void *unused) {
         int go = 1;
         while (go && avcodec_receive_frame(E.vdec, f) >= 0) {
             AVRational tb = E.ic->streams[E.vi]->time_base;
+            if (E.slow_ms) usleep((useconds_t)E.slow_ms * 1000);
             long long pts = f->best_effort_timestamp != AV_NOPTS_VALUE
                                 ? av_rescale_q(f->best_effort_timestamp, tb, AV_TIME_BASE_Q)
                             : last != NONE ? last
@@ -752,7 +809,9 @@ static void *video_main(void *unused) {
              * a place's first picture, and its first few say nothing of the Q2's speed. */
             int late = !first && timed && c > pts + dur && c - pts < E.jump_us;
             int level = ladder_frame(&lad, now, ++count > 8 && late, f->key_frame);
-            if (late) {
+            /* but one goes up every half second all the same: a stream with nothing to skip
+             * (every picture a keyframe) decoded too slowly is a slideshow, not a still */
+            if (late && now - up < SHOW_MS) {
                 av_frame_unref(f);
                 continue;
             }
@@ -766,6 +825,24 @@ static void *video_main(void *unused) {
                 av_frame_unref(f);
                 continue;
             }
+            /* a stream that grows midway is weighed again, as the file was when it was opened
+             * (what the player holds is in use by now, so nothing is taken off for it) */
+            long long weight = (long long)f->width * f->height * pix_bits(f->format);
+            if (!weighed)
+                weighed =
+                    (long long)E.m.w * E.m.h * pix_bits(E.ic->streams[E.vi]->codecpar->format);
+            if (weight > weighed && too_large(f->width, f->height, pix_bits(f->format),
+                                              E.mem_kb ? E.mem_kb : mem_available())) {
+                lock();
+                fail(TOO_LARGE, f->width, f->height);
+                E.state = ENG_FAILED;
+                kick(), notify();
+                unlock();
+                av_frame_unref(f);
+                go = 0;
+                continue;
+            }
+            if (weight > weighed) weighed = weight;
             if (!sws || f->width != fw || f->height != fh || f->format != ffmt ||
                 fill_now != ffill) {
                 AVRational sar = f->sample_aspect_ratio.num > 0 ? f->sample_aspect_ratio : E.sar;
@@ -805,7 +882,7 @@ static void *video_main(void *unused) {
             lock();
             if (serial == E.serial && sws && d) {
                 p->pts = pts, p->dur = dur, p->serial = serial, p->g = g;
-                ++E.count;
+                ++E.count, up = now_ms();
                 if (first) E.first_serial = serial, E.first_us = pts, first = 0;
                 kick(), notify();
             }
@@ -1153,9 +1230,11 @@ static void *audio_main(void *arg) {
             if (current) avcodec_send_packet(dec, n->pkt), a->fed = 1;
             node_free(n);
             lock();
-        } else if (!dec || a->drained || E.eof || capped()) {
+        } else if (!dec || a->drained || E.eof || (capped() && !shed(1))) {
             /* Nothing to play and nothing coming: silence, so the clock runs on for the picture.
-             * The track is over when it is: its end is where the timeline stands. */
+             * Not while the reader is held at its limit by picture that is behind: that goes
+             * (shed), and the sound waits the moment the reader takes to bring more. The track
+             * is over when it is: its end is where the timeline stands. */
             if ((!dec || a->drained) && !E.adone && a->serial == E.serial)
                 E.adone = 1, E.aend_us = a->tl == 1 ? a->base + a->frames * 1000000 / RATE : NONE,
                 notify();
@@ -1372,10 +1451,11 @@ int eng_cues(long long ms, char buf[][LINE_N], int max, long long *next) {
     return n;
 }
 
-void eng_test(unsigned mem_kb, const char *sink) {
+void eng_test(unsigned mem_kb, const char *sink, int slow_ms) {
     lock();
     E.checked = 1;
     if (mem_kb) E.mem_kb = mem_kb;
+    if (slow_ms) E.slow_ms = slow_ms;
     if (sink)
         E.fault = !strcmp(sink, "stall")  ? FAULT_STALL
                   : !strcmp(sink, "lost") ? FAULT_LOST
@@ -1410,8 +1490,9 @@ int eng_close(void) {
     pthread_mutex_t m = E.lock;
     pthread_cond_t c = E.cond, i = E.idle;
     unsigned mem = E.mem_kb;
-    int fault = E.fault, checked = E.checked;
+    int fault = E.fault, checked = E.checked, slow = E.slow_ms;
     memset(&E, 0, sizeof E);
     E.lock = m, E.cond = c, E.idle = i, E.mem_kb = mem, E.fault = fault, E.checked = checked;
+    E.slow_ms = slow;
     return 1;
 }

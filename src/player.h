@@ -240,8 +240,9 @@ int eng_cues(long long ms, char buf[][LINE_N], int max, long long *next);
 int eng_close(void);
 /* The checks': mem_kb in place of MemAvailable (0: the real one); the output made to fail
  * ("stall": it takes no more, "lost": it refuses, "back": works again, "gone": it can't be
- * opened, to be said before eng_open). */
-void eng_test(unsigned mem_kb, const char *sink);
+ * opened, to be said before eng_open); each picture made slow_ms slower to decode, on the real
+ * clock (0: as it was). */
+void eng_test(unsigned mem_kb, const char *sink, int slow_ms);
 
 /* ---- osd.c --------------------------------------------------------------------------------- */
 
