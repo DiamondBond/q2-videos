@@ -1,8 +1,9 @@
 # Videos for the Shanling Q2. `make` builds the card app into dist/.videos/ and dist/videos.zip
 # (needs the Q2 sysroot, FFmpeg 4.2's headers from tools/ffmpeg.sh and a Q2 Pod rootfs for the
 # Q2's own FFmpeg libraries, see README); `make host` builds it for this computer against the
-# FFmpeg 4.2 tools/ffmpeg.sh built, `make check` runs the checks there under ASan and UBSan, and
-# `make check-q2` starts the Q2's binary under qemu against the Q2's libraries.
+# FFmpeg 4.2 tools/ffmpeg.sh built, `make check` runs the checks there under ASan and UBSan
+# (the player's over tools/clips.sh's clips, with the rootfs's font), `make check-q2` starts the
+# Q2's binary under qemu against the Q2's libraries, and `make qemu-check` has it play there.
 SYSROOT ?= $(HOME)/.cache/q2/sysroot
 ROOTFS ?= $(lastword $(sort $(wildcard $(HOME)/git/q2/q2-pod/dist/*/rootfs.squashfs \
                                        $(HOME)/git/q2/q2-pod/dist/*/build/rootfs.squashfs)))
@@ -22,13 +23,14 @@ HOST_LIBS = -L$(FFMPEG)/host/lib -Wl,-rpath,$(FFMPEG)/host/lib -lavformat -lavco
 COMMON_SRC = src/main.c src/common.c src/store.c src/library.c
 
 # The full-screen player (player_main):
-PLAYER_SRC =
+PLAYER_SRC = src/player.c src/engine.c src/picture.c src/sound.c src/subs.c src/draw.c src/osd.c \
+             src/platform_script.c
 
 # The page's server (serve_main):
 SERVE_SRC = src/serve.c src/thumb.c
 
 # The Q2's build alone (the start file, and what needs the Q2: its screen, ALSA):
-Q2_ONLY_SRC = src/crt-q2.c
+Q2_ONLY_SRC = src/crt-q2.c src/platform_q2.c src/sound_q2.c
 
 # The host build alone (what stands in for the Q2 there):
 HOST_ONLY_SRC =
@@ -54,6 +56,8 @@ Q2_LIBS = $(AVLIBS) $(SYSROOT)/lib/libasound.so.2 $(SYSROOT)/lib/libc.so.6 $(SYS
           --no-as-needed $(SYSROOT)/lib/ld-linux-mipsn8.so.1
 # Each tests/check*.c is a program of its own, linked with everything but main.c.
 CHECKS = $(patsubst tests/%.c,build/host/%,$(wildcard tests/check*.c))
+# The Q2's own font, which the player's checks draw with (tests/check_player.c looks for it here).
+FONT = build/rootfs/release/assets/default/raw/fonts/default.ttf
 # The Q2's binary on this computer: qemu's user mode with a CPU that has the Q2's NaNs and FPU,
 # over the Q2's libraries, every symbol bound at the start so that one the Q2 lacks fails here.
 QEMU = qemu-mipsel-static -cpu P5600 -L $(CURDIR)/build/q2root -E LD_BIND_NOW=1
@@ -66,6 +70,9 @@ $(AVLIBS) $(AVDEPS) &:
 	    usr/lib/libavcodec.so.58 usr/lib/libavcodec.so.58.54.100 usr/lib/libavutil.so.56 usr/lib/libavutil.so.56.31.100 \
 	    usr/lib/libswscale.so.5 usr/lib/libswscale.so.5.5.100 usr/lib/libswresample.so.3 usr/lib/libswresample.so.3.5.100 \
 	    usr/lib/libz.so.1 usr/lib/libz.so.1.2.11 usr/lib/libssl.so.1.1 usr/lib/libcrypto.so.1.1 >/dev/null
+$(FONT):
+	@test -f "$(ROOTFS)" || { echo "No rootfs: make ROOTFS=path/to/rootfs.squashfs (a Q2 Pod build's)"; exit 1; }
+	unsquashfs -q -f -d build/rootfs "$(ROOTFS)" release/assets/default/raw/fonts/default.ttf >/dev/null
 $(FFMPEG)/include-q2/libavcodec/avcodec.h $(FFMPEG)/host/lib/libavcodec.so:
 	@echo "No FFmpeg 4.2 in $(FFMPEG): run tools/ffmpeg.sh"; exit 1
 
@@ -99,7 +106,7 @@ build/host/q2-videos: $(HOST_OBJ)
 	cc $(HOST_CFLAGS) -o $@ $(HOST_OBJ) $(HOST_LIBS)
 build/host/%: tests/%.c $(filter-out build/host/main.o,$(HOST_OBJ)) $(HDR)
 	cc $(HOST_CFLAGS) -Isrc -o $@ $< $(filter-out build/host/main.o,$(HOST_OBJ)) $(HOST_LIBS)
-check: $(CHECKS) build/host/q2-videos
+check: $(CHECKS) build/host/q2-videos $(FONT)
 	sh -n run
 	@set -e; for c in $(CHECKS); do echo ./$$c; ./$$c; done
 
@@ -116,10 +123,13 @@ check-q2: $(DIST)/q2-videos build/q2/check build/q2root
 	$(QEMU) $(DIST)/q2-videos --version
 	cd build/q2 && $(QEMU) ./check # in there: its build/check-card is not the host check's
 
-# The Q2's server under $(QEMU), started as run starts it and spoken to over its socket by the
-# host's check: the covers looked at are then the ones the Q2's own libavcodec made.
-qemu-check: $(DIST)/q2-videos build/host/check_serve build/q2root
+# The Q2's binary under $(QEMU), against the Q2's own libraries: the server started as run starts
+# it and spoken to over its socket by the host's check (the covers looked at are then the ones the
+# Q2's own libavcodec made), and the player playing the clips by the same scripts as the host
+# build, which must show the same frames (tests/check_player.c --qemu).
+qemu-check: $(DIST)/q2-videos build/q2root build/host/check_serve build/host/check_player $(FONT)
 	./build/host/check_serve $(QEMU) $(DIST)/q2-videos
+	build/host/check_player --qemu "$(QEMU) $(CURDIR)/$(DIST)/q2-videos"
 
 clean:
 	rm -rf build dist
