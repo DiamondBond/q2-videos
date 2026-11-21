@@ -153,6 +153,11 @@ static void check_marks(void) {
                                 "5\t9\t0\t4\t-2\t-1\t100\tno such track.mp4\n"
                                 "5\t9\t0\t4\t-1\t-1\t-100\tno such size.mp4\n"
                                 "5\t9\t0\t99999999999\t-1\t-1\t100\tno such seq.mp4\n"
+                                "5\t9\t0\t4294967295\t-1\t-1\t100\ta seq that wraps.mp4\n"
+                                "10\t9\t0\t4\t-1\t-1\t100\tpast its length.mp4\n"
+                                "9223372036854775807\t0\t0\t4\t-1\t-1\t100\tno such place.mp4\n"
+                                "5\t99999999999999\t0\t4\t-1\t-1\t100\tno such length.mp4\n"
+                                "5\t0\t0\t5\t-1\t-1\t100\tno length.mp4\n"
                                 "5\t9\t0\t4\t-1\t-1\t100\t../../etc/passwd\n"
                                 "5\t9\t0\t4\t-1\t-1\t100\t\n"
                                 "5\t9\t0\t4\t-1\t-1\t100\tdos.mp4\r\n"
@@ -161,7 +166,7 @@ static void check_marks(void) {
                                 "1\t2\t0\t6\t-1\t-1\t3\tan eighth\tfield.mp4\n"
                                 "5\t9\t0\t12\t-1\t-1\t100\ttorn.mp");
     marks_load(&m);
-    CHECK(m.n == 2 && m.seq == 8);
+    CHECK(m.n == 3 && m.seq == 8 && marks_find(&m, "no length.mp4", 100)->pos_ms == 5);
     CHECK((k = marks_find(&m, "good.mp4", 100)) && k->pos_ms == 5 && k->dur_ms == 9 && k->seq == 3);
     CHECK((k = marks_find(&m, "twice.mp4", 100)) && k->pos_ms == 7 && k->seq == 8 && k->sub == 1);
 

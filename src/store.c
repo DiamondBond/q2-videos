@@ -65,6 +65,9 @@ int settings_step(settings_t *s, const char *key) {
 
 /* ---- Marks --------------------------------------------------------------------------------- */
 
+#define MS_MAX (10000ll * 3600000) /* a place or a length past 10,000 hours is neither */
+#define SEQ_MAX (1 << 30)          /* a billion plays on: no file of ours says more */
+
 void marks_free(marks_t *m) {
     for (int i = 0; i < m->n; ++i) free(m->v[i].rel);
     m->n = 0;
@@ -101,8 +104,12 @@ static int mark_parse(char *line, mark_t *k) {
         if (errno || *end != '\t') return 0;
         line = end + 1;
     }
-    if (f[0] < 0 || f[1] < 0 || f[2] < 0 || f[2] > UINT_MAX || f[3] < 0 || f[3] > UINT_MAX ||
-        f[4] < -1 || f[4] > INT_MAX || f[5] < -1 || f[5] > INT_MAX || f[6] < 0 || !rel_ok(line))
+    /* nor a place past its length (when that is known) or either past any video's, which a
+     * seek would multiply out of 64 bits; nor a seq so high that the next would wrap round and
+     * make the video just played the oldest */
+    if (f[0] < 0 || f[1] < 0 || f[0] > MS_MAX || f[1] > MS_MAX || (f[1] && f[0] > f[1]) ||
+        f[2] < 0 || f[2] > UINT_MAX || f[3] < 0 || f[3] > SEQ_MAX || f[4] < -1 || f[4] > INT_MAX ||
+        f[5] < -1 || f[5] > INT_MAX || f[6] < 0 || !rel_ok(line))
         return 0;
     *k = (mark_t){ f[0], f[1], f[6], (unsigned)f[2], (unsigned)f[3], (int)f[4], (int)f[5], line };
     return 1;
