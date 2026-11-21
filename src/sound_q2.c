@@ -84,12 +84,12 @@ static long alsa_write(const short *s, long frames) {
 /* Not yet heard: ALSA's delay, floored at what its ring still holds. Nothing is heard while it
  * holds all that was written (its first fill; Bluetooth adds the link's own delay), and after a
  * drop bluealsa answers the link's delay alone. A delay it can't say is none: it ran dry. */
-static long alsa_unheard(long written) {
+static long alsa_unheard(long long written) {
     snd_pcm_sframes_t delay, avail = snd_pcm_avail(pcm);
     long ring = avail >= 0 ? (long)buffer - (long)avail : 0;
     if (snd_pcm_delay(pcm, &delay) || delay < 0) delay = 0;
     if (delay < ring) delay = ring;
-    return delay < written ? delay : written;
+    return delay < written ? delay : (long)written;
 }
 
 static void alsa_drop(void) { snd_pcm_drop(pcm), snd_pcm_prepare(pcm); }

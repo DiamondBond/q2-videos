@@ -88,13 +88,12 @@ typedef struct {
     int alsa;                   /* that output is ALSA and open */
     int abandoned;              /* it hangs in its output: when it comes back it only ends */
     volatile unsigned write_at; /* now_ms | 1 when it went into a write, 0 out of it */
-    long long n0; /* the silent output: when what it holds began to play, and how much */
-    long nw;
+    long long n0, nw; /* the silent output: when what it holds began to play, and how much */
     int serial, track,
         opened;             /* the seek and the sound track it is on; its decoder was asked for */
     int tl;                 /* its timeline: 0 not begun, 1 begun, 2 begins at its first frame */
     long long base, frames; /* what is written ends at base + frames / RATE */
-    long written;           /* frames in the output since it was opened or dropped */
+    long long written;      /* frames in the output since it was opened or dropped */
     short hist[HIST * 2]; /* the last written, before the volume: a pause plays the unheard again */
     int hist_n, hist_at;
     short rep[HIST * 4]; /* those, waiting to be written again */
@@ -191,7 +190,7 @@ enum { FAULT_NONE, FAULT_STALL, FAULT_LOST, FAULT_GONE };
 /* ---- Time, and waking the main thread ------------------------------------------------------ */
 
 static int virt;
-static volatile int vnow;
+static volatile int vnow; /* an int, read whole by any thread: a script's run is minutes */
 static int wake[2] = { -1, -1 };
 
 long long now_ms(void) {
@@ -201,8 +200,8 @@ long long now_ms(void) {
     return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
-/* from a second in: no time of a run is 0, which the player reads as never */
-void clock_virtual(void) { virt = 1, vnow = 1000; }
+/* from a second in at least: no time of a run is 0, which the player reads as never */
+void clock_virtual(int from) { virt = 1, vnow = from > 1000 ? from : 1000; }
 
 int wake_fd(void) {
     if (wake[0] < 0 && pipe2(wake, O_CLOEXEC | O_NONBLOCK)) wake[0] = wake[1] = -1;
@@ -233,8 +232,11 @@ static void notify(void) {
 }
 
 /* A thread's wait, the lock held: until the next change, or until the clock reaches until (0:
- * no time). It comes back for any change, so the caller looks again. */
+ * no time). It comes back for any change, so the caller looks again. A time below zero is none
+ * a clock gives: taken as no time, where pthread_cond_timedwait would refuse it with the lock
+ * still held and the caller spin on it. */
 static void wait_for(worker_t *w, long long until) {
+    if (until < 0) until = 0;
     w->busy = 0, w->seen = E.kicks, w->until = until;
     pthread_cond_signal(&E.idle);
     if (until && !virt) {
@@ -834,8 +836,8 @@ static long null_write(au_t *a, long n) {
     while (E.fault == FAULT_STALL && a->device && !E.quit && !a->abandoned) wait_for(&a->w, 0);
     if ((E.fault == FAULT_LOST || E.fault == FAULT_GONE) && a->device) return unlock(), -1;
     while (!E.quit && !a->abandoned) {
-        long long now = now_ms();
-        long played = (long)(now - a->n0) * (RATE / 1000);
+        /* in 64 bits: the Q2's long is 32, and a clock 12 hours from boot times 48 is past it */
+        long long now = now_ms(), played = (now - a->n0) * (RATE / 1000);
         if (played >= a->nw) a->n0 = now, a->nw = 0, played = 0; /* it ran dry: from now */
         if (a->nw - played + n <= RING) break;
         wait_for(&a->w, a->n0 + (a->nw + n - RING + RATE / 1000 - 1) / (RATE / 1000));
@@ -849,8 +851,8 @@ static long out_unheard(au_t *a) {
 #ifndef HOST
     if (a->alsa) return sink_alsa.unheard(a->written);
 #endif
-    long left = a->nw - (long)(now_ms() - a->n0) * (RATE / 1000);
-    return left < 0 ? 0 : left > a->written ? a->written : left;
+    long long left = a->nw - (now_ms() - a->n0) * (RATE / 1000);
+    return left < 0 ? 0 : left > a->written ? (long)a->written : (long)left;
 }
 
 static void out_drop(au_t *a) {
@@ -1271,7 +1273,7 @@ void eng_poll(snap_t *s, pix **cur) {
                 if (early <= 0) E.rebase = p->pts, kick();
             }
             if (early > 0) {
-                s->due_ms = (int)((early + 999) / 1000);
+                s->due_ms = (early + 999) / 1000;
                 break;
             }
             if (E.count > 1 && c >= E.pic[(E.ridx + 1) % PICS].pts && c - p->pts < E.jump_us) {
@@ -1305,7 +1307,7 @@ void eng_poll(snap_t *s, pix **cur) {
         /* only the last of it left to hear or to stay on the screen: look again when it has */
         long long left = E.aend_us != NONE && c < E.aend_us ? E.aend_us - c : 0;
         if (shown && E.shown_us + E.shown_dur - c > left) left = E.shown_us + E.shown_dur - c;
-        s->due_ms = (int)((left + 999) / 1000);
+        s->due_ms = (left + 999) / 1000;
     }
     unlock();
 }

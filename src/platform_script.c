@@ -13,7 +13,8 @@
  *     <ms> outside 30     the volume changed by other means (a headset's keys)
  *
  * Time is the script's own (clock_virtual), so a run takes as long as its decoding and always
- * shows the same frames; $VIDEOS_CLOCK=real plays it on the real clock. */
+ * shows the same frames, from $VIDEOS_CLOCK ms when that is a number (a Q2 long awake);
+ * $VIDEOS_CLOCK=real plays it on the real clock. */
 #include "player.h"
 #include <poll.h>
 #include <signal.h>
@@ -30,7 +31,7 @@ static int script_open(void) {
     const char *path = getenv("VIDEOS_SCRIPT"), *clock = getenv("VIDEOS_CLOCK");
     if (!path || !(script = file_get(path, 0))) return 0;
     real = clock && !strcmp(clock, "real");
-    if (!real) clock_virtual();
+    if (!real) clock_virtual(clock ? atoi(clock) : 0);
     next = script, began = now_ms();
     return 1;
 }

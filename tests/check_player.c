@@ -1521,6 +1521,18 @@ static void run_faults(void) {
     SAME(notice("a"), "Playing without sound");
 }
 
+/* A Q2 awake for 14 hours: its clock's milliseconds times the 48 frames in each is past 32 bits,
+ * which is all the Q2's long has (so this one says most by the Q2's binary, under the emulator). */
+static void run_awake(int device) {
+    videos("h264-aac.mp4");
+    finish(begin(device, "awake", "h264-aac.mp4", "1000 shot a\n3000 shot b\n3500 key 170\n",
+                 "VIDEOS_CLOCK=50000000"),
+           "awake");
+    CHECK(num("a", "t") == 50001000 && num("a", "pos") == 1000 && num("b", "pos") == 3000 &&
+          num("b", "pic") == 3000);
+    NEAR(num("b", "frames"), 3000 * 48, RATE / 5), NEAR(num("b", "tone"), 880, 15);
+}
+
 /* Files that aren't simple: timestamps that start above nothing, start again or run out of
  * bits, frames at uneven times, no sound, no picture, a sound that ends early, a broken end. */
 static void run_files(void) {
@@ -1688,6 +1700,7 @@ static void run_qemu(void) {
         printf("qemu-check: %-20s %.1f s under the emulator\n", clip[i],
                (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9);
     }
+    run_awake(1);
 }
 
 int main(int argc, char **argv) {
@@ -1734,6 +1747,7 @@ int main(int argc, char **argv) {
     run_refused();
     run_next();
     run_faults();
+    run_awake(0);
     run_files();
     run_term();
     run_lock();

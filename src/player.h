@@ -143,8 +143,8 @@ typedef struct {
     /* 1 when dev is open; patient: wait as long as the Q2's player may take to let go of it */
     int (*open)(const char *dev, int patient, const volatile int *quit);
     long (*write)(const short *s, long frames); /* all of them, waiting; -1 when it is lost */
-    long (*unheard)(long written); /* of the frames written since open or drop: not yet heard */
-    void (*drop)(void);            /* what it holds is let go; ready for more */
+    long (*unheard)(long long written); /* of the frames written since open or drop: unheard */
+    void (*drop)(void);                 /* what it holds is let go; ready for more */
     void (*close)(void);
 } sink_t;
 #ifndef HOST
@@ -156,7 +156,7 @@ extern const sink_t sink_alsa;
 /* Milliseconds: the monotonic clock, or the script's own (clock_virtual), which moves only when
  * the main thread waits and every other thread has done what it can. */
 long long now_ms(void);
-void clock_virtual(void);
+void clock_virtual(int from); /* from ms, a second at least */
 /* The script's wait, on its own clock: the engine's threads settle, then the clock moves to
  * until, in steps that let them work at each of their own times. Returns early, 0, when the
  * engine has something for the main thread (eng_poll). */
@@ -201,7 +201,7 @@ typedef struct {
     int picture;      /* there has been one */
     long long pos_ms; /* the place: the clock's, or where a seek is going */
     long long pic_ms; /* the picture's own time */
-    int due_ms;       /* the next picture is due in this long; -1 when none waits */
+    long long due_ms; /* the next picture is due in this long; -1 when none waits */
     int ended;        /* all of it was played */
     int lost;         /* the output failed: nothing plays until eng_output */
     int silent;       /* the output takes no sound: playing on without */
