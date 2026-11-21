@@ -22,13 +22,14 @@ HOST_LIBS = -L$(FFMPEG)/host/lib -Wl,-rpath,$(FFMPEG)/host/lib -lavformat -lavco
 COMMON_SRC = src/main.c src/common.c src/store.c src/library.c
 
 # The full-screen player (player_main):
-PLAYER_SRC =
+PLAYER_SRC = src/player.c src/engine.c src/picture.c src/sound.c src/subs.c src/draw.c src/osd.c \
+             src/platform_script.c
 
 # The page's server (serve_main):
 SERVE_SRC =
 
 # The Q2's build alone (the start file, and what needs the Q2: its screen, ALSA):
-Q2_ONLY_SRC = src/crt-q2.c
+Q2_ONLY_SRC = src/crt-q2.c src/platform_q2.c src/sound_q2.c
 
 # The host build alone (what stands in for the Q2 there):
 HOST_ONLY_SRC =
