@@ -65,8 +65,7 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
  * gone. in and out may be -1: the checks run a round in their own process. */
 int worker_pass(char *level, int in, int out);
 /* The worker, a process of its own (the server's child): rounds until one is through, at nice
- * 19. Its exit status is 0, or WORKER_NO_AV when the FFmpeg loaded is not the one built for. */
-#define WORKER_NO_AV 3
+ * 19. */
 void worker_main(const char *level, int in, int out) __attribute__((noreturn));
 
 #endif

@@ -36,7 +36,7 @@ static void dac_set(unsigned long request, int v) {
     close(fd);
 }
 
-static int alsa_open(const char *dev, int patient, const volatile int *quit) {
+int alsa_open(const char *dev, int patient, const volatile int *quit) {
     char usb[16];
     int err = -1, tries = !patient ? 1 : !strcmp(dev, "plughw:0,0") ? 20 : 50;
     snd_pcm_uframes_t period;
@@ -66,7 +66,7 @@ static int alsa_open(const char *dev, int patient, const volatile int *quit) {
     return 1;
 }
 
-static long alsa_write(const short *s, long frames) {
+long alsa_write(const short *s, long frames) {
     int recovered = 0;
     for (long sent = 0; sent < frames;) {
         long r = snd_pcm_writei(pcm, s + 2 * sent, (snd_pcm_uframes_t)(frames - sent));
@@ -84,7 +84,7 @@ static long alsa_write(const short *s, long frames) {
 /* Not yet heard: ALSA's delay, floored at what its ring still holds. Nothing is heard while it
  * holds all that was written (its first fill; Bluetooth adds the link's own delay), and after a
  * drop bluealsa answers the link's delay alone. A delay it can't say is none: it ran dry. */
-static long alsa_unheard(long long written) {
+long alsa_unheard(long long written) {
     snd_pcm_sframes_t delay, avail = snd_pcm_avail(pcm);
     long ring = avail >= 0 ? (long)buffer - (long)avail : 0;
     if (snd_pcm_delay(pcm, &delay) || delay < 0) delay = 0;
@@ -92,14 +92,12 @@ static long alsa_unheard(long long written) {
     return delay < written ? delay : (long)written;
 }
 
-static void alsa_drop(void) { snd_pcm_drop(pcm), snd_pcm_prepare(pcm); }
+void alsa_drop(void) { snd_pcm_drop(pcm), snd_pcm_prepare(pcm); }
 
-static void alsa_close(void) {
+void alsa_close(void) {
     if (!pcm) return;
     snd_pcm_drop(pcm);
     snd_pcm_close(pcm);
     pcm = 0;
     if (jack) dac_set(DAC_MUTE, 1);
 }
-
-const sink_t sink_alsa = { alsa_open, alsa_write, alsa_unheard, alsa_drop, alsa_close };

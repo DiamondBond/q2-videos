@@ -1,32 +1,11 @@
 /* Videos' host checks of what the server and the player share (make check, under ASan and UBSan):
  * whole files and the lock, the settings and the marks, the names and their order, the rows'
  * texts and keys, and a library made in build/check-card. */
-#include "videos.h"
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "check.h"
 
 #define CARD "build/check-card"
 #define TMP "build/check-tmp"
-#define CHECK(c) ((c) ? (void)0 : (fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c), abort()))
-#define SAME(text, want) CHECK(!strcmp(text, want))
-
-static void sh(const char *cmd) { CHECK(!system(cmd)); }
-/* a file of size bytes (a hole: nothing is written), its folders made, changed at mtime */
-static void file(const char *path, long long size, long long mtime) {
-    char cmd[2 * PATH_N];
-    snprintf(cmd, sizeof cmd, "mkdir -p \"$(dirname '%s')\"", path);
-    sh(cmd);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    struct timespec t[2] = { { mtime, 0 }, { mtime, 0 } };
-    CHECK(fd >= 0 && !ftruncate(fd, size) && !futimens(fd, t) && !close(fd));
-}
-static void text(const char *path, const char *s) { CHECK(file_put(path, s, strlen(s))); }
-
-/* ---- Files, the lock, memory, FFmpeg ------------------------------------------------------- */
+/* ---- Files, the lock, memory --------------------------------------------------------------- */
 
 static void check_common(void) {
     SAME(card_dir, "/mnt/mmc"), SAME(state_dir, "/mnt/mmc/.videos"), SAME(tmp_dir, "/tmp");
@@ -59,9 +38,6 @@ static void check_common(void) {
     CHECK(!too_large(640, 360, 3375) && too_large(640, 360, 3374));
     CHECK(!too_large(0, 1080, 1) && !too_large(1920, -1, 1) && !too_large(7680, 4320, 0));
     CHECK(too_large(32768, 32768, 4000000u)); /* no overflow on the way */
-
-    char why[80] = "?";
-    CHECK(av_ok(why, sizeof why) && !*why);
 }
 
 /* ---- Settings ------------------------------------------------------------------------------ */

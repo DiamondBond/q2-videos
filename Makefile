@@ -18,8 +18,7 @@ HOST_CFLAGS = -std=gnu11 -O1 -g -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURC
               -DVERSION='"$(VERSION)"' -I$(FFMPEG)/host/include
 HOST_LIBS = -L$(FFMPEG)/host/lib -Wl,-rpath,$(FFMPEG)/host/lib -lavformat -lavcodec -lswscale -lswresample -lavutil -lm -lpthread
 
-# The sources, in lists of their own so that the player and the server grow on different lines.
-# What both use:
+# The sources. What both use:
 COMMON_SRC = src/main.c src/common.c src/store.c src/library.c
 
 # The full-screen player (player_main):
@@ -32,16 +31,13 @@ SERVE_SRC = src/serve.c src/thumb.c
 # The Q2's build alone (the start file, and what needs the Q2: its screen, ALSA):
 Q2_ONLY_SRC = src/crt-q2.c src/platform_q2.c src/sound_q2.c
 
-# The host build alone (what stands in for the Q2 there):
-HOST_ONLY_SRC =
-
 # The rows' static covers, JPEGs: copied beside the binary and packed into the zip.
 TILES = assets/tile-folder.jpg assets/tile-settings.jpg assets/tile-nopicture.jpg
 
 SRC = $(COMMON_SRC) $(PLAYER_SRC) $(SERVE_SRC)
 Q2_OBJ = $(patsubst src/%.c,build/q2/%.o,$(SRC) $(Q2_ONLY_SRC))
-HOST_OBJ = $(patsubst src/%.c,build/host/%.o,$(SRC) $(HOST_ONLY_SRC))
-HDR = $(wildcard src/*.h) VERSION
+HOST_OBJ = $(patsubst src/%.c,build/host/%.o,$(SRC))
+HDR = $(wildcard src/*.h tests/*.h) VERSION
 DIST = dist/.videos
 # The Q2's own FFmpeg, linked as it has it, and what that needs in turn.
 AVLIBS = $(addprefix build/rootfs/usr/lib/,libavformat.so.58 libavcodec.so.58 libswscale.so.5 libswresample.so.3 libavutil.so.56)
@@ -90,7 +86,7 @@ $(DIST)/run: run
 	cp $< $@
 	chmod 755 $@
 dist/videos.zip: $(DIST)/q2-videos $(DIST)/q2app $(DIST)/run $(TILES)
-	$(if $(TILES),cp $(TILES) $(DIST)/)
+	cp $(TILES) $(DIST)/
 	cd dist && rm -f videos.zip && zip -qX videos.zip $(addprefix .videos/,q2app run q2-videos $(notdir $(TILES)))
 	@ls -l $@
 

@@ -67,10 +67,9 @@ typedef struct {
     int n, room;
 } cues_t;
 /* A SubRip file's text (n bytes) into c, in order of start: a BOM is taken, line ends may be
- * CRLF, a byte that is no UTF-8 is read as Latin-1, and tags (<i>, {\an8}) are left out. Returns
- * the cues added. */
+ * CRLF, and tags (<i>, {\an8}) are left out; the bytes are kept as they are (text_at draws one
+ * that is no UTF-8 as Latin-1's letter). Returns the cues added. */
 int srt_parse(const char *data, size_t n, cues_t *c);
-int cues_add(cues_t *c, long long start, long long end, const char *text); /* a copy of text */
 void cues_free(cues_t *c);
 /* The cues on show at ms, the earliest first, up to max of them; *next, when given, is the next
  * time after ms at which the answer changes (a start or an end), or -1. */
@@ -137,18 +136,15 @@ void swap_lr(short *s, unsigned n);      /* n stereo frames, left and right exch
 /* "usb", the USB DAC, as plughw:N,0: N from cards, /proc/asound/cards' text. out has 16 bytes. */
 const char *usb_device(const char *cards, char *out);
 
-/* Where the sound goes: ALSA on the Q2 (sound_q2.c), or nothing that keeps time (engine.c). All
- * of one are called from one thread, the engine's audio thread. */
-typedef struct {
-    /* 1 when dev is open; patient: wait as long as the Q2's player may take to let go of it */
-    int (*open)(const char *dev, int patient, const volatile int *quit);
-    long (*write)(const short *s, long frames); /* all of them, waiting; -1 when it is lost */
-    long (*unheard)(long long written); /* of the frames written since open or drop: unheard */
-    void (*drop)(void);                 /* what it holds is let go; ready for more */
-    void (*close)(void);
-} sink_t;
+/* Where the sound goes on the Q2: ALSA (sound_q2.c; elsewhere, and without a device, engine.c
+ * counts the time instead). All are called from one thread, the engine's audio thread. */
 #ifndef HOST
-extern const sink_t sink_alsa;
+/* 1 when dev is open; patient: wait as long as the Q2's player may take to let go of it */
+int alsa_open(const char *dev, int patient, const volatile int *quit);
+long alsa_write(const short *s, long frames); /* all of them, waiting; -1 when it is lost */
+long alsa_unheard(long long written); /* of the frames written since open or drop: not yet heard */
+void alsa_drop(void);                 /* what it holds is let go; ready for more */
+void alsa_close(void);
 #endif
 
 /* ---- engine.c ------------------------------------------------------------------------------ */
@@ -171,7 +167,7 @@ void wake_drain(void);
 #define CHAPTERS 100
 typedef struct {
     char name[64];
-    int index; /* the stream's; -1 - k for the kth subtitle file */
+    int index; /* the stream's */
     int ok;    /* 0: listed, not playable (subtitles that are pictures) */
 } track_t;
 typedef struct {      /* an opened video */

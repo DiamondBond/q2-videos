@@ -18,7 +18,7 @@ A card app for the Shanling Q2. Unzipped at the card's root, `videos.zip` holds 
 | `make host` | Builds `build/host/q2-videos`, the same program for this computer, against the FFmpeg 4.2 above |
 | `make check` | Runs every `tests/check*.c` on this computer under ASan and UBSan, and checks `run`'s syntax |
 | `make check-q2` | Starts the Q2's binary, and runs `tests/check.c` built for the Q2, under `qemu-mipsel-static` with the Q2's libraries |
-| `make qemu-check` | Starts the Q2's `q2-videos serve` under `qemu-mipsel-static` on a card of test clips, asks it for its lists over its socket, and checks the covers the Q2's own FFmpeg made |
+| `make qemu-check` | Starts the Q2's `q2-videos serve` under `qemu-mipsel-static` on a card of test clips, asks it for its lists over its socket, and checks the covers the Q2's own FFmpeg made; then has the Q2's binary play clips by script there, which must show the frames the host build shows |
 | `make clean` | Removes `build/` and `dist/` |
 
 `tools/clips.sh` makes the test clips in `~/.cache/q2-videos/clips` from ffmpeg's own test picture and tones: H.264, MPEG-4 and VP9 pictures, several sounds, subtitles inside the file and beside it, chapters, a turned picture, pixels that aren't square, 1080p and 60 frames a second. FFmpeg 4.2 has no H.264, VP9 or Opus encoder of its own, so the system's `ffmpeg` (with libx264; libvpx-vp9 and libopus for the WebM clip) encodes those and 4.2 writes the files; each clip is then decoded whole by 4.2.

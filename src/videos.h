@@ -42,6 +42,9 @@ int file_put(const char *path, const void *data, size_t n);
  * holds it (close() lets go), or -1. */
 int lock_take(int exclusive);
 
+/* The monotonic clock, ms. */
+long long mono_ms(void);
+
 /* /proc/meminfo's MemAvailable, kB; 0 unknown. */
 unsigned mem_available(void);
 /* 1 when decoding a w x h picture would hold more than avail_kb in frames alone (10 of them at
@@ -49,10 +52,18 @@ unsigned mem_available(void);
  * unknown size or avail_kb (0) is never too large. */
 int too_large(int w, int h, unsigned avail_kb);
 
-/* 1 when the FFmpeg loaded is the one this was built for (libavcodec, libavformat, libavutil,
- * libswscale and libswresample, by major version). Else 0, and why says which. The player and
- * the server call it before anything of FFmpeg's. */
-int av_ok(char *why, size_t n);
+/* The video at path opened, for the thumbnails and the player alike: as one of FORMATS or not at
+ * all, and nothing but files for whatever it names in turn, so a playlist or a script named .mp4
+ * is never followed; "file:" so that no name reads as a protocol's. libavformat asks stop(arg)
+ * wherever it reads or waits and lets go when that says 1. 0 when it can't be opened, and
+ * libavformat's error in *err when err is given. */
+struct AVFormatContext;
+struct AVStream;
+struct AVFormatContext *input_open(const char *path, int (*stop)(void *), void *arg, int *err);
+/* The turn a stream's container asks for, clockwise degrees, 0 to 359: a phone's video held
+ * upright is stored on its side with a rotate tag (FFmpeg 4.2's mov reader sets the tag whenever
+ * the display matrix is a rotation, and no other reader makes the matrix). */
+int rotation(struct AVStream *st);
 
 /* ---- store.c: the app's state on the card, in state_dir ------------------------------------ */
 /* Nothing in store.c or library.c locks: a settings_t, marks_t or listing_t is one thread's. */

@@ -6,6 +6,7 @@
  * qemu-check). The clips are tools/clips.sh's ($VIDEOS_CLIPS), and FFmpeg 4.2's ffmpeg
  * ($VIDEOS_FFMPEG) makes two more here. */
 #include "serve.h"
+#include "check.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -28,31 +29,9 @@
 #define ART TMP "/q2-videos.art"
 #define CACHE CARD "/.videos/cache"
 #define CAPS "playlist progress pages library art window urls sort field screen volume"
-#define CHECK(c) ((c) ? (void)0 : (fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c), abort()))
-#define SAME(text, want)                                                                           \
-    (strcmp(text, want)                                                                            \
-         ? (fprintf(stderr, "%s:%d: \"%s\", not \"%s\"\n", __FILE__, __LINE__, text, want),        \
-            abort())                                                                               \
-         : (void)0)
 
 static const char *clips, *ffmpeg; /* where the test clips are, and FFmpeg 4.2's ffmpeg */
 
-static void sh(const char *fmt, ...) {
-    char cmd[4 * PATH_N];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(cmd, sizeof cmd, fmt, ap);
-    va_end(ap);
-    if (system(cmd)) fprintf(stderr, "failed: %s\n", cmd), abort();
-}
-/* a file of size bytes (a hole: nothing is written), its folders made, changed at mtime */
-static void file(const char *path, long long size, long long mtime) {
-    sh("mkdir -p \"$(dirname '%s')\"", path);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    struct timespec t[2] = { { mtime, 0 }, { mtime, 0 } };
-    CHECK(fd >= 0 && !ftruncate(fd, size) && !futimens(fd, t) && !close(fd));
-}
-static void text(const char *path, const char *s) { CHECK(file_put(path, s, strlen(s))); }
 static int same_file(const char *a, const char *b) {
     size_t n = 0, m = 1;
     char *x = file_get(a, &n), *y = file_get(b, &m);
@@ -60,11 +39,7 @@ static int same_file(const char *a, const char *b) {
     free(x), free(y);
     return same;
 }
-static long long now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
-}
+static long long now_ms(void) { return mono_ms(); }
 /* the next of a row of numbers that is the same each run, from an unsigned seed in scope */
 #define RND() (seed = seed * 1664525u + 1013904223u, seed >> 8)
 static void nap(int ms) { usleep((useconds_t)ms * 1000); }
@@ -425,7 +400,7 @@ static void check_levels(void) {
     row_is(1, "screen", "play", "b", "1 MB", "Series/Season 1/b.avi", "mark");
     CHECK(ask("dir\tMovies") == 1),
         row_is(0, "screen", "play", "Фильм", "5.0 GB", "Movies/Фильм.mkv", "mark");
-    CHECK(ask("dir\t100%%25 Real") == 0 || 1); /* an escaped argument is read back */
+    CHECK(ask("dir\tSeries%%2fSeason 1") == 2); /* an escaped argument is read back */
     CHECK(!act("dir\tSeries/Season 3")), SAME(STATUS, "unavailable");
 
     /* Sort: Newest First is the videos by when they changed; the folders stay as they were */
@@ -901,8 +876,9 @@ static void check_covers(void) {
     CHECK(ask("menu") == 9 && !strcmp(rp.raw + 12, raw + 12) && art_count() == 9);
 
     /* Continue Watching has its video's cover: the same key, counted for both rows */
-    marks_put(&m, "rotated.mp4", (long long)key_of(CARD "/Videos", "rotated.mp4") * 0 + 478819)
-        ->pos_ms = 1000;
+    struct stat st; /* the mark is the file's by its size */
+    CHECK(!stat(V "rotated.mp4", &st));
+    marks_put(&m, "rotated.mp4", st.st_size)->pos_ms = 1000;
     CHECK(marks_save(&m) && ask("menu") == 10 && covers() == 10 && art_count() == 9);
     SAME(ROW(0, CTX), "rotated.mp4"), SAME(ROW(0, SUB), "rotated \xc2\xb7 Less than a minute left");
     marks_free(&m);

@@ -10,7 +10,7 @@
 
 /* ---- Cues ---------------------------------------------------------------------------------- */
 
-int cues_add(cues_t *c, long long start, long long end, const char *text) {
+static int cues_add(cues_t *c, long long start, long long end, const char *text) {
     if (c->n == c->room) {
         int room = c->room ? c->room * 2 : 64;
         cue_t *v = realloc(c->v, (size_t)room * sizeof *v);
@@ -45,21 +45,6 @@ int cues_at(const cues_t *c, long long ms, const cue_t **out, int max, long long
 }
 
 /* ---- Plain text ---------------------------------------------------------------------------- */
-
-static void put_utf8(char **o, unsigned cp) {
-    char *p = *o;
-    if (cp < 0x80)
-        *p++ = (char)cp;
-    else if (cp < 0x800)
-        *p++ = (char)(0xc0 | cp >> 6), *p++ = (char)(0x80 | (cp & 0x3f));
-    else if (cp < 0x10000)
-        *p++ = (char)(0xe0 | cp >> 12), *p++ = (char)(0x80 | (cp >> 6 & 0x3f)),
-        *p++ = (char)(0x80 | (cp & 0x3f));
-    else
-        *p++ = (char)(0xf0 | cp >> 18), *p++ = (char)(0x80 | (cp >> 12 & 0x3f)),
-        *p++ = (char)(0x80 | (cp >> 6 & 0x3f)), *p++ = (char)(0x80 | (cp & 0x3f));
-    *o = p;
-}
 
 /* text's lines trimmed in place, the empty ones left out */
 static void trim_lines(char *text) {
@@ -163,25 +148,9 @@ static int by_start(const void *a, const void *b) {
 }
 
 int srt_parse(const char *data, size_t n, cues_t *c) {
-    /* as UTF-8 first: a byte that is none is Latin-1's letter, two bytes at most */
-    char *text = malloc(2 * n + 1), *o = text;
+    if (n >= 3 && !memcmp(data, "\xef\xbb\xbf", 3)) data += 3, n -= 3;
+    char *text = strndup(data, n); /* to its first NUL: a text file has none */
     if (!text) return 0;
-    const char *p = data, *stop = data + n;
-    if (n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) p += 3;
-    while (p < stop) {
-        if (!*p) { /* a NUL in a text file: nothing of ours */
-            ++p;
-            continue;
-        }
-        const char *q = p;
-        char tail[5] = { 0 }; /* utf8_next reads to a NUL: the file's last bytes get one */
-        if (stop - p < 4) memcpy(tail, p, (size_t)(stop - p)), q = tail;
-        const char *was = q;
-        unsigned cp = utf8_next(&q);
-        p += q - was;
-        if (cp != '\r') put_utf8(&o, cp);
-    }
-    *o = 0;
 
     int before = c->n, open = 0;
     long long start = 0, end = 0;
@@ -195,7 +164,7 @@ int srt_parse(const char *data, size_t n, cues_t *c) {
             if (!memcmp(line + i, "-->", 3)) arrow = line + i;
         int timing = arrow && stamp(&t, &a) && (t += strspn(t, " \t"), t == arrow) &&
                      (t += 3, stamp(&t, &b));
-        int blank = strspn(line, " \t") == len;
+        int blank = strspn(line, " \t\r") == len;
         if (open && (timing || blank || !next)) { /* the cue's last line: the one before this */
             char *stop_at = blank || timing ? line : line + len;
             char keep = *stop_at;

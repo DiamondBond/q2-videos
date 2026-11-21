@@ -35,7 +35,6 @@
 #include <unistd.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavutil/display.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
@@ -139,8 +138,7 @@ static struct {
     media_t m;
     AVFormatContext *ic;
     AVCodecContext *vdec;
-    int vi, ai, still; /* the streams playing, -1 none; still: the picture is a cover */
-    int astream[TRACKS];
+    int vi, ai, still;  /* the streams playing, -1 none; still: the picture is a cover */
     int aswitched;      /* the changes of sound track the reader has made */
     long long start_us; /* the file's first timestamp */
     long long jump_us;  /* timestamps further apart than this are a jump, not a gap */
@@ -160,9 +158,7 @@ static struct {
     int first_serial; /* the seek whose first picture is decoded, at first_us */
     long long first_us;
     int shown_serial, picture; /* the main thread's: the seek its picture is of */
-    long long shown_us, shown_dur, shown_at;
-    long long
-        rebase; /* a picture went up far from the clock: the time the clock is asked to take */
+    long long shown_us, shown_dur;
     geom_t geom;
     int vdone, adone;
     long long aend_us; /* where the sound track ended */
@@ -183,7 +179,7 @@ static struct {
     long long frames; /* the checks': sound sent out, its tone, the ladder's level */
     int tone, level;
     unsigned mem_kb;
-    int fault;
+    int fault, checked; /* checked: a script runs this, and reads the tone */
 } E = { .lock = PTHREAD_MUTEX_INITIALIZER };
 enum { FAULT_NONE, FAULT_STALL, FAULT_LOST, FAULT_GONE };
 
@@ -193,12 +189,7 @@ static int virt;
 static volatile int vnow; /* an int, read whole by any thread: a script's run is minutes */
 static int wake[2] = { -1, -1 };
 
-long long now_ms(void) {
-    struct timespec t;
-    if (virt) return vnow;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
-}
+long long now_ms(void) { return virt ? vnow : mono_ms(); }
 
 /* from a second in at least: no time of a run is 0, which the player reads as never */
 void clock_virtual(int from) { virt = 1, vnow = from > 1000 ? from : 1000; }
@@ -357,43 +348,11 @@ static void track_name(const AVStream *st, int nth, const char *more, char *out,
              more);
 }
 
-/* The turn the container asks for, clockwise degrees: the stream's rotate tag, else its display
- * matrix (which counts the other way). */
-static int rotation(AVStream *st) {
-    const AVDictionaryEntry *tag = av_dict_get(st->metadata, "rotate", 0, 0);
-    const uint8_t *matrix = av_stream_get_side_data(st, AV_PKT_DATA_DISPLAYMATRIX, 0);
-    double turn = tag      ? atof(tag->value)
-                  : matrix ? -av_display_rotation_get((const int32_t *)matrix)
-                           : 0;
-    return turn == turn ? (int)turn : 0; /* a matrix that is no rotation says NaN */
-}
-
-/* The file at path opened, as the page's thumbnails open it (thumb.c): as one of FORMATS or not
- * at all, and nothing but files for whatever it names in turn, so a playlist or a script named
- * .mp4 is never followed; "file:" so that no name reads as a protocol's. An open or a read that
- * hangs ends when the engine does (interrupted). 0, and libavformat's error in *err, when it
- * can't be. */
-static AVFormatContext *input_open(const char *path, int *err) {
-    char url[PATH_N + 8];
-    AVDictionary *opts = 0;
-    AVFormatContext *ic = avformat_alloc_context();
-    *err = AVERROR(ENOMEM);
-    if (!ic) return 0;
-    ic->interrupt_callback = (AVIOInterruptCB){ interrupted, 0 };
-    snprintf(url, sizeof url, "file:%s", path);
-    av_dict_set(&opts, "format_whitelist", FORMATS, 0);
-    av_dict_set(&opts, "protocol_whitelist", "file", 0);
-    if ((*err = avformat_open_input(&ic, url, 0, &opts)) < 0)
-        ic = 0; /* a failed open has freed it */
-    av_dict_free(&opts);
-    return ic;
-}
-
 /* The file opened and looked into: 1 when it can be played, else E.why says why not. */
 static int media_open(void) {
     char name[32];
     int err;
-    AVFormatContext *ic = input_open(E.path, &err);
+    AVFormatContext *ic = input_open(E.path, interrupted, 0, &err); /* ends when we do */
     if (!ic) /* nothing FFmpeg knows, or (EINVAL) something that isn't one of FORMATS */
         return fail(err == AVERROR_INVALIDDATA || err == AVERROR(EINVAL)
                         ? "It is not a video file the Q2 knows."
@@ -417,7 +376,6 @@ static int media_open(void) {
             continue;
         }
         if (E.m.naudio == TRACKS) continue;
-        E.astream[E.m.naudio] = (int)i;
         track_name(st, E.m.naudio, "", E.m.audio[E.m.naudio].name, sizeof E.m.audio->name);
         E.m.audio[E.m.naudio].index = (int)i, E.m.audio[E.m.naudio++].ok = 1;
     }
@@ -470,10 +428,10 @@ static int media_open(void) {
     int best = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, E.vi, 0, 0);
     E.ai = -1, E.m.audio_cur = -1;
     for (int i = 0; i < E.m.naudio; ++i)
-        if (E.astream[i] == best || E.m.audio_cur < 0) E.m.audio_cur = i;
+        if (E.m.audio[i].index == best || E.m.audio_cur < 0) E.m.audio_cur = i;
     if (E.want_audio >= 0 && E.want_audio < E.m.naudio) E.m.audio_cur = E.want_audio;
     if (E.m.audio_cur >= 0)
-        E.ai = E.astream[E.m.audio_cur], ic->streams[E.ai]->discard = AVDISCARD_DEFAULT;
+        E.ai = E.m.audio[E.m.audio_cur].index, ic->streams[E.ai]->discard = AVDISCARD_DEFAULT;
     E.m.sound = E.ai >= 0;
 
     /* subtitles: text ones can be shown, pictures (PGS, DVD) only listed */
@@ -600,7 +558,7 @@ static void *reader_main(void *unused) {
         if (aswitch != E.aswitch) { /* another sound track: its packets from here on */
             aswitch = E.aswitch;
             if (E.ai >= 0) E.ic->streams[E.ai]->discard = AVDISCARD_ALL;
-            E.m.audio_cur = E.want_audio, E.ai = E.astream[E.want_audio];
+            E.m.audio_cur = E.want_audio, E.ai = E.m.audio[E.want_audio].index;
             E.ic->streams[E.ai]->discard = AVDISCARD_DEFAULT;
             anext = NONE;
             pq_flush(&E.aq);
@@ -849,7 +807,7 @@ static long null_write(au_t *a, long n) {
 
 static long out_unheard(au_t *a) {
 #ifndef HOST
-    if (a->alsa) return sink_alsa.unheard(a->written);
+    if (a->alsa) return alsa_unheard(a->written);
 #endif
     long long left = a->nw - (now_ms() - a->n0) * (RATE / 1000);
     return left < 0 ? 0 : left > a->written ? (long)a->written : (long)left;
@@ -857,7 +815,7 @@ static long out_unheard(au_t *a) {
 
 static void out_drop(au_t *a) {
 #ifndef HOST
-    if (a->alsa) sink_alsa.drop();
+    if (a->alsa) alsa_drop();
 #endif
     a->nw = 0;
 }
@@ -904,7 +862,7 @@ static int emit(au_t *a, const short *src, int n) {
     }
     a->write_at = (unsigned)now_ms() | 1;
 #ifndef HOST
-    long r = a->alsa ? sink_alsa.write(buf, n) : null_write(a, n);
+    long r = a->alsa ? alsa_write(buf, n) : null_write(a, n);
 #else
     long r = null_write(a, n);
 #endif
@@ -916,7 +874,7 @@ static int emit(au_t *a, const short *src, int n) {
     if (r < 0) { /* the output is gone: nothing more until the main thread says */
         unlock();
 #ifndef HOST
-        if (a->alsa) sink_alsa.close();
+        if (a->alsa) alsa_close();
 #endif
         lock();
         a->alsa = 0, a->lost = 1, a->written = 0, a->nw = 0;
@@ -932,8 +890,8 @@ static int emit(au_t *a, const short *src, int n) {
         a->hist_at = (a->hist_at + 1) % HIST;
     }
     a->hist_n = a->hist_n + n > HIST ? HIST : a->hist_n + n;
-    if (src) { /* the checks': how much sound went out, and its pitch */
-        E.frames += n;
+    if (src) E.frames += n;
+    if (src && E.checked) { /* the checks': the pitch of what went out */
         for (int i = 0; i < n; ++i) {
             int up = src[2 * i] >= 0;
             a->zc += up != a->zlast, a->zlast = up;
@@ -1046,7 +1004,7 @@ static void *audio_main(void *arg) {
     int stream = -1, open = 1;
 #ifndef HOST
     if (a->device && *E.device) /* here, on the thread every call to it is made from */
-        open = a->alsa = sink_alsa.open(E.device, 1, &E.quit);
+        open = a->alsa = alsa_open(E.device, 1, &E.quit);
 #endif
     lock();
     if (a->device && (!open || E.fault == FAULT_GONE)) a->device = 0, E.silent = 1, notify();
@@ -1091,7 +1049,7 @@ static void *audio_main(void *arg) {
 #ifndef HOST
             if (*E.device) {
                 unlock();
-                ok = a->alsa = sink_alsa.open(E.device, 0, &E.quit);
+                ok = a->alsa = alsa_open(E.device, 0, &E.quit);
                 lock();
             }
 #endif
@@ -1123,11 +1081,6 @@ static void *audio_main(void *arg) {
             } else
                 a->base = E.start_us + E.target_ms * 1000, a->tl = dec ? 2 : 1;
             a->frames = 0;
-        }
-        /* a picture far from the clock: with no sound to keep to, follow it */
-        if (E.rebase != NONE) {
-            if (!dec || a->drained) a->base = E.rebase, a->frames = out_unheard(a);
-            E.rebase = NONE;
         }
         if (a->rep_n) { /* what a pause left unheard */
             int n = a->rep_n < CHUNK ? a->rep_n : CHUNK;
@@ -1179,7 +1132,7 @@ static void *audio_main(void *arg) {
     int ended = !a->abandoned; /* abandoned: the output is another's now, or nobody's */
     unlock();
 #ifndef HOST
-    if (ended && a->alsa) sink_alsa.close();
+    if (ended && a->alsa) alsa_close();
 #endif
     if (ended) {
         avcodec_free_context(&dec);
@@ -1227,7 +1180,6 @@ void eng_open(const char *path, long long start_ms, const char *device, int gain
     E.gain = gain, E.fill = fill, E.want_audio = audio, E.want_sub = -1, E.sub_nth = sub;
     E.state = ENG_OPENING, E.vi = E.ai = -1;
     E.first_serial = E.shown_serial = E.clk.serial = E.skip_serial = -1;
-    E.rebase = NONE;
     E.target_ms = start_ms;
     if (start_ms > 0) E.seek.pending = 1, E.seek.how = SEEK_BACK, E.seek.ms = start_ms;
     for (int i = 0; i < PICS; ++i)
@@ -1265,13 +1217,10 @@ void eng_poll(snap_t *s, pix **cur) {
         /* a place's first picture goes up at once, paused or not; those after it, in their time */
         if (E.shown_serial == E.serial) {
             if (E.paused || !ok) break;
+            /* ponytail: a file that is no transport stream (joined() carries those), has no
+             * sound to move the clock, and whose timestamps jump an hour or more waits that hour
+             * here; follow the picture's time if such a file ever shows. */
             long long early = p->pts - c;
-            if (early > E.jump_us || -early > E.jump_us) {
-                /* Nowhere near the clock: the timestamps jumped. It goes up when the one before
-                 * has had its time, and a clock that no sound holds is asked to follow. */
-                early = (E.shown_at - now) * 1000 + E.shown_dur;
-                if (early <= 0) E.rebase = p->pts, kick();
-            }
             if (early > 0) {
                 s->due_ms = (early + 999) / 1000;
                 break;
@@ -1283,8 +1232,7 @@ void eng_poll(snap_t *s, pix **cur) {
         }
         pix *mine = *cur;
         *cur = p->px, p->px = mine;
-        E.shown_serial = p->serial, E.shown_us = p->pts, E.shown_dur = p->dur, E.shown_at = now,
-        E.geom = p->g;
+        E.shown_serial = p->serial, E.shown_us = p->pts, E.shown_dur = p->dur, E.geom = p->g;
         E.ridx = (E.ridx + 1) % PICS, --E.count;
         E.picture = s->fresh = 1;
     }
@@ -1336,7 +1284,7 @@ void eng_pause(int on) {
 
 void eng_audio(int nth) {
     lock();
-    if (E.state == ENG_READY && nth >= 0 && nth < E.m.naudio && E.astream[nth] != E.ai)
+    if (E.state == ENG_READY && nth >= 0 && nth < E.m.naudio && E.m.audio[nth].index != E.ai)
         E.want_audio = nth, ++E.aswitch, kick();
     unlock();
 }
@@ -1383,6 +1331,7 @@ int eng_cues(long long ms, char buf[][LINE_N], int max, long long *next) {
 
 void eng_test(unsigned mem_kb, const char *sink) {
     lock();
+    E.checked = 1;
     if (mem_kb) E.mem_kb = mem_kb;
     if (sink)
         E.fault = !strcmp(sink, "stall")  ? FAULT_STALL
@@ -1418,8 +1367,8 @@ int eng_close(void) {
     pthread_mutex_t m = E.lock;
     pthread_cond_t c = E.cond, i = E.idle;
     unsigned mem = E.mem_kb;
-    int fault = E.fault;
+    int fault = E.fault, checked = E.checked;
     memset(&E, 0, sizeof E);
-    E.lock = m, E.cond = c, E.idle = i, E.mem_kb = mem, E.fault = fault;
+    E.lock = m, E.cond = c, E.idle = i, E.mem_kb = mem, E.fault = fault, E.checked = checked;
     return 1;
 }

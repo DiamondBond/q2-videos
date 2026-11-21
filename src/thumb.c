@@ -126,11 +126,7 @@ static int index_save(void) {
 
 /* ---- A video's thumbnail ------------------------------------------------------------------- */
 
-static long long now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
-}
+static long long now_ms(void) { return mono_ms(); }
 
 /* libavformat asks this wherever it reads or waits: 1 once the video's time is up, and it lets
  * go with an error. */
@@ -227,15 +223,13 @@ static int jpeg(AVFrame *out, unsigned char *jpg, size_t *n) {
 static int shot(AVFormatContext *f, AVCodecContext *c, int stream, long long at, AVPacket *pkt,
                 AVFrame *frame, AVFrame *out, long long *end) {
     AVStream *st = f->streams[stream];
-    AVDictionaryEntry *tag = av_dict_get(st->metadata, "rotate", 0, 0);
     if (at >= 0 && av_seek_frame(f, -1, at, AVSEEK_FLAG_BACKWARD) >= 0) avcodec_flush_buffers(c);
     if (!picture(f, c, stream, pkt, frame, end) ||
         !shrink(frame, av_guess_sample_aspect_ratio(f, st, frame), out))
         return 0;
     /* a phone's video held upright is stored on its side, with the turn that shows it (FFmpeg 4.2
      * gives it as this tag, in degrees clockwise) */
-    long deg = tag ? strtol(tag->value, 0, 10) % 360 : 0;
-    int times = (int)((deg + 360) % 360) / 90;
+    int times = rotation(st) / 90;
     turn(out->data[0], out->linesize[0], THUMB_PX, times);
     turn(out->data[1], out->linesize[1], THUMB_PX / 2, times);
     turn(out->data[2], out->linesize[2], THUMB_PX / 2, times);
@@ -243,10 +237,8 @@ static int shot(AVFormatContext *f, AVCodecContext *c, int stream, long long at,
 }
 
 int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t *n) {
-    char url[PATH_N + 8];
     long long end = now_ms() + ms;
-    AVFormatContext *f = avformat_alloc_context();
-    AVDictionary *opts = 0;
+    AVFormatContext *f = 0;
     AVCodecContext *c = 0;
     AVPacket *pkt = av_packet_alloc();
     AVFrame *frame = av_frame_alloc(), *out = av_frame_alloc(), *again = 0;
@@ -258,15 +250,8 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
     if (getenv("VIDEOS_CRASH") && strstr(path, getenv("VIDEOS_CRASH"))) abort();
     while (getenv("VIDEOS_HANG") && strstr(path, getenv("VIDEOS_HANG"))) pause();
 #endif
-    /* "file:" so that no name is read as a protocol's, and that protocol alone for whatever the
-     * file names in turn */
-    snprintf(url, sizeof url, "file:%s", path);
-    av_dict_set(&opts, "format_whitelist", FORMATS, 0);
-    av_dict_set(&opts, "protocol_whitelist", "file", 0);
-    if (f) f->interrupt_callback = (AVIOInterruptCB){ late, &end };
-    /* a failed open has freed f */
-    int open = f && pkt && frame && out && avformat_open_input(&f, url, 0, &opts) >= 0;
-    av_dict_free(&opts);
+    if (pkt && frame && out) f = input_open(path, late, &end, 0);
+    int open = f != 0;
     if (open && avformat_find_stream_info(f, 0) >= 0) {
         if (f->duration > 0 && f->duration / 1000 <= DUR_MAX) t->dur_ms = f->duration / 1000;
         stream = av_find_best_stream(f, AVMEDIA_TYPE_VIDEO, -1, -1, 0, 0);
@@ -304,10 +289,7 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
     av_frame_free(&out);
     av_frame_free(&frame);
     av_packet_free(&pkt);
-    if (open)
-        avformat_close_input(&f);
-    else
-        avformat_free_context(f);
+    avformat_close_input(&f);
     return made;
 }
 
@@ -433,10 +415,9 @@ int worker_pass(char *level, int in, int out) {
 }
 
 void worker_main(const char *first, int in, int out) {
-    char level[REL_MAX + 1], why[80];
+    char level[REL_MAX + 1];
     setpriority(PRIO_PROCESS, 0, 19); /* playback, the list and everything else come first */
     fcntl(in, F_SETFL, O_NONBLOCK);
-    if (!av_ok(why, sizeof why)) _exit(WORKER_NO_AV);
     av_log_set_level(AV_LOG_QUIET);
     av_max_alloc(ALLOC_MAX);
     snprintf(level, sizeof level, "%s", first);

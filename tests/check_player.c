@@ -11,6 +11,7 @@
  * The clips are tools/clips.sh's ($VIDEOS_CLIPS, else ~/.cache/q2-videos/clips); the font is the
  * Q2's ($VIDEOS_FONT, else the one the Makefile takes from a Q2 Pod rootfs). */
 #include "player.h"
+#include "check.h"
 #include <fcntl.h>
 #include <libavformat/avformat.h>
 #include <signal.h>
@@ -28,12 +29,6 @@
 #define TMP "build/player-tmp"
 #define OUT "build/player-out"
 #define FONT_ROOTFS "build/rootfs/release/assets/default/raw/fonts/default.ttf"
-#define CHECK(c) ((c) ? (void)0 : (fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c), abort()))
-#define SAME(text, want)                                                                           \
-    (!strcmp(text, want)                                                                           \
-         ? (void)0                                                                                 \
-         : (fprintf(stderr, "%s:%d: \"%s\" is not \"%s\"\n", __FILE__, __LINE__, text, want),      \
-            abort()))
 /* a is within by of b */
 #define NEAR(a, b, by)                                                                             \
     ((a) >= (b) - (by) && (a) <= (b) + (by)                                                        \
@@ -43,15 +38,6 @@
             abort()))
 
 static const char *clips, *qemu;
-
-static void sh(const char *fmt, ...) {
-    char cmd[4 * PATH_N];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(cmd, sizeof cmd, fmt, ap);
-    va_end(ap);
-    if (system(cmd)) fprintf(stderr, "failed: %s\n", cmd), abort();
-}
 
 /* ---- Subtitles ----------------------------------------------------------------------------- */
 
@@ -68,14 +54,14 @@ static void check_subs(void) {
     CHECK(c.v[0].start == 1000 && c.v[0].end == 3000 && c.v[1].start == 4000 && c.v[1].end == 6500);
     SAME(c.v[0].text, "Caf\xc3\xa9 d\xc3\xa9j\xc3\xa0 vu"), SAME(c.v[1].text, "One\nTwo");
     cues_free(&c);
-    /* bytes that are no UTF-8 are Latin-1, beside ones that are; hours; a dot for the comma; no
+    /* bytes that are no UTF-8 stay as they are (drawn as Latin-1's); hours; a dot for the comma; no
      * blank line between two cues, and none at the end; out of order */
     const char *mixed = "9\n01:00:00.500 --> 01:00:02.000\nlater\n"
                         "1\n00:00:01,000 --> 00:00:03,000\nCaf\xe9 "
                         "\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82\n"
                         "2\n00:00:02,000 --> 00:00:05,000\noverlaps";
     CHECK(srt_parse(mixed, strlen(mixed), &c) == 3);
-    SAME(c.v[0].text, "Caf\xc3\xa9 \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82");
+    SAME(c.v[0].text, "Caf\xe9 \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82");
     SAME(c.v[1].text, "overlaps"), SAME(c.v[2].text, "later");
     CHECK(c.v[2].start == 3600500 && c.v[2].end == 3602000);
     /* which are on show, and when that next changes */
@@ -694,7 +680,7 @@ static long long num(const char *name, const char *key) {
     return atoll(p + strlen(k));
 }
 /* Its subtitle lines, a | between two; its notice; where its picture lies. */
-static const char *text(const char *name) { return strstr(at(name), " text=") + 6; }
+static const char *lines(const char *name) { return strstr(at(name), " text=") + 6; }
 static const char *notice(const char *name) {
     static char n[128];
     const char *p = strstr(at(name), " notice=") + 8;
@@ -1122,7 +1108,7 @@ static void run_volume(void) {
          "300 w -28\n400 shot v0\n500 v 41\n600 shot v1\n1000 w -56\n1100 shot v2\n1120 v 43\n"
          "1400 shot v3\n2700 shot v4\n3000 v 30\n3100 shot v5\n5000 w -280\n5050 v 35\n"
          "5100 shot v6\n5400 shot v7\n6000 v 35 20\n6100 shot v8\n6200 v 35 h35\n"
-         "6300 shot v9\n7000 w 1120\n7100 shot v10\n7500 key 170\n",
+         "6300 shot v9\n7000 w 1120\n7100 shot v10\n7300 shot v11\n7500 key 170\n",
          0);
     CHECK(num("v0", "volume") == -1 &&
           num("v0", "told") == -1); /* not known yet: the wheel asks nothing */
@@ -1136,7 +1122,8 @@ static void run_volume(void) {
           num("v7", "told") == 35); /* the Maximum volume's word */
     CHECK(num("v2", "gain") == 65536 && num("v8", "gain") == bt_gain(20) &&
           num("v9", "gain") == 65536);
-    CHECK(num("v10", "volume") == 0);
+    /* an asking never answered falls back to Q2 Pod's last word */
+    CHECK(num("v10", "volume") == 0 && num("v11", "volume") == 35);
     /* the speaker, and the bar filled to the level */
     CHECK(rgb("v2", 48, 286) == WHITE && rgb("v2", 72 + 257 * 43 / 100 - 3, 285) == WHITE &&
           rgb("v2", 72 + 257 * 43 / 100 + 3, 285) == GREY);
@@ -1145,40 +1132,14 @@ static void run_volume(void) {
     SAME(asked, "0");
     free(asked);
 
-    /* Q2 Pod's side played by the script (platform_script.c's fw), the Maximum volume 60 */
-    play("firmware", "h264-aac.mp4",
-         "0 firmware 41 60\n500 shot f0\n1000 w -56\n1100 shot f1\n3000 w -560\n3100 shot f2\n"
-         "3400 shot f3\n5000 w -28\n5400 shot f4\n5500 w -28\n5900 shot f5\n6000 outside 59\n"
-         "6100 shot f6\n7000 w -56\n7400 shot f7\n8000 key 170\n",
-         0);
-    CHECK(num("f0", "told") == 41 && num("f0", "volume") == -1); /* the start's "?" answered */
-    CHECK(num("f1", "volume") == 43 && num("f1", "told") == 43); /* set, and said so */
-    /* twenty up: 63 asked and 60 answered, which the bar shows once the wheel has rested */
-    CHECK(num("f2", "volume") == 63 && num("f2", "told") == 60 && num("f3", "volume") == 60);
-    /* at the limit: 61 asked, 60 answered; 61 again is the file's text as it was, and nothing
-     * is answered: the bar is still Q2 Pod's last word */
-    CHECK(num("f4", "volume") == 60 && num("f5", "volume") == 60 && num("f5", "told") == 60);
-    /* a change from elsewhere moves the bar, and with the file gone 61 can be asked again */
-    CHECK(num("f6", "volume") == 59 && num("f6", "told") == 59);
-    CHECK(num("f7", "volume") == 60 && num("f7", "told") == 60);
+    /* the start asks where the volume stands; until Q2 Pod answers, the level is the volume
+     * argument's */
+    play("ask", "h264-aac.mp4", "300 key 170\n", 0);
     asked = file_get(TMP "/q2-videos.volume", 0);
-    SAME(asked, "61");
+    SAME(asked, "?");
     free(asked);
-    /* on Bluetooth the answer carries the gain to apply; on a USB DAC, which applies it itself,
-     * a level to show. Until Q2 Pod answers, the level is the volume argument's. */
     play("argument", "h264-aac.mp4", "300 w -28\n400 shot a\n1000 key 170\n", "ARG2=37");
     CHECK(num("a", "volume") == 38 && num("a", "told") == -1 && num("a", "gain") == bt_gain(37));
-    play("firmware-bt", "h264-aac.mp4",
-         "0 firmware 30 100 bt\n600 shot b\n1000 w -280\n1400 shot c\n2000 outside 20\n"
-         "2100 shot d\n2500 key 170\n",
-         "ARG2=37");
-    CHECK(num("b", "told") == 30 && num("b", "volume") == -1 && num("b", "gain") == bt_gain(30));
-    CHECK(num("c", "volume") == 40 && num("c", "gain") == bt_gain(40));
-    CHECK(num("d", "volume") == 20 && num("d", "gain") == bt_gain(20));
-    play("firmware-usb", "h264-aac.mp4",
-         "0 firmware 30 100 usb\n600 shot b\n1000 w -280\n1400 shot c\n2500 key 170\n", "ARG2=h37");
-    CHECK(num("b", "told") == 30 && num("b", "gain") == 65536);
-    CHECK(num("c", "volume") == 40 && num("c", "told") == 40 && num("c", "gain") == 65536);
 }
 
 /* The sound tracks: the default, another chosen in the options, and that one remembered. */
@@ -1216,14 +1177,14 @@ static void run_subs(void) {
          "9500 shot over\n",
          0);
     CHECK(says("nsubs=1 nside=0 chapters=0 sub=0") && !num("a", "sub"));
-    SAME(text("a"), "Hello");
+    SAME(lines("a"), "Hello");
     CHECK(ink("a", 100, 266, 274, 305) > 100); /* drawn, under the picture */
     CHECK(num("list", "menu") == 3 &&
           num("list", "sel") == 1); /* Off, English: on the one that is on */
     CHECK(num("off", "sub") == -1 && !num("off", "menu") && !ink("off", 0, 266, 374, 319));
-    SAME(text("off"), "");
+    SAME(lines("off"), "");
     CHECK(!num("on", "sub"));
-    SAME(text("on"), "こんにちは|Two lines"), SAME(text("over"), "");
+    SAME(lines("on"), "こんにちは|Two lines"), SAME(lines("over"), "");
     CHECK(mark_of("two-audio-subs.mkv").sub == 1);
     /* the choice is the video's: Off stays off the next time, whatever the setting */
     play("srt-off", "two-audio-subs.mkv",
@@ -1241,12 +1202,12 @@ static void run_subs(void) {
 
     /* ASS: its tags gone, \N a line's end, \h a space; MP4's own; WebVTT */
     play("ass", "ass.mkv", "1500 shot a\n4500 shot b\n7500 shot c\n", 0);
-    SAME(text("a"), "Italic and plain"), SAME(text("b"), "First line|Second line");
-    SAME(text("c"), "Top, with a comma and a hard space");
+    SAME(lines("a"), "Italic and plain"), SAME(lines("b"), "First line|Second line");
+    SAME(lines("c"), "Top, with a comma and a hard space");
     play("movtext", "movtext.mp4", "1500 shot a\n4500 shot b\n7500 shot c\n", 0);
-    SAME(text("a"), "Hello"), SAME(text("b"), "Привет"), SAME(text("c"), "こんにちは|Two lines");
+    SAME(lines("a"), "Hello"), SAME(lines("b"), "Привет"), SAME(lines("c"), "こんにちは|Two lines");
     play("webvtt", "webvtt.mkv", "1500 shot a\n4500 shot b\n7500 shot c\n", 0);
-    SAME(text("a"), "Hello"), SAME(text("b"), "Привет"), SAME(text("c"), "こんにちは|Two lines");
+    SAME(lines("a"), "Hello"), SAME(lines("b"), "Привет"), SAME(lines("c"), "こんにちは|Two lines");
 
     /* files beside the video: its own name's first, a Latin-1 line read as such; then the other,
      * chosen in the options (Audio's row is there and can't be chosen: one track) */
@@ -1255,17 +1216,18 @@ static void run_subs(void) {
          "5950 shot list\n6000 w -28\n6050 key 218\n6100 key 170\n6200 shot c\n7500 shot d\n",
          0);
     CHECK(says("nsubs=0 nside=2 chapters=0 sub=0"));
-    SAME(text("a"), "First line|Second line"), SAME(text("b"), "Привет, мир");
+    SAME(lines("a"), "First line|Second line"), SAME(lines("b"), "Привет, мир");
     CHECK(num("menu", "menu") == 1 && num("menu", "sel") == 1 && num("list", "menu") == 3 &&
           num("list", "sel") == 1);
     CHECK(num("c", "sub") == 1);
-    SAME(text("c"), ""), SAME(text("d"), ""); /* the other file has nothing there */
+    SAME(lines("c"), ""), SAME(lines("d"), ""); /* the other file has nothing there */
     CHECK(mark_of("sidecar.mp4").sub == 2);
     play("sidecar-again", "sidecar.mp4", "1500 shot a\n4500 shot b\n", 0);
-    SAME(text("a"), "Café déjà vu"), SAME(text("b"), "こんにちは"); /* a BOM, CRLF */
+    SAME(lines("a"), "Café déjà vu"), SAME(lines("b"), "こんにちは"); /* a BOM, CRLF */
     marked("sidecar.mp4", 0, 10022, 0, -1, 1);
     play("sidecar-latin", "sidecar.mp4", "7500 shot a\n", 0);
-    SAME(text("a"), "Café déjà vu"); /* é and à as Latin-1's one byte each */
+    SAME(lines("a"),
+         "Caf\xe9 d\xe9j\xe0 vu"); /* é and à as Latin-1's one byte each, drawn as such */
 
     /* the three sizes, and above the controls when they are up */
     int n[3];

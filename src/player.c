@@ -763,7 +763,6 @@ static void opened(long long now) {
 /* Plays the video at rel to its end, or until it is left: END_OVER or END_QUIT. */
 static int play(const char *rel) {
     struct stat st;
-    char why[160];
     long long now = now_ms();
     cues_free(&V.cues);
     memset(&V, 0, sizeof V);
@@ -772,10 +771,7 @@ static int play(const char *rel) {
     V.pend_ms = V.sub_next = -1, V.sub = -1, V.input_at = now;
     V.state = ENG_FAILED, V.why = "The file can't be read.";
     say("open %s", rel);
-    if (!av_ok(why, sizeof why))
-        V.why = "This Q2's FFmpeg is not the one Videos was built for.";
-    else if (lib_path(P.root, rel, V.path, sizeof V.path) && !stat(V.path, &st) &&
-             S_ISREG(st.st_mode)) {
+    if (lib_path(P.root, rel, V.path, sizeof V.path) && !stat(V.path, &st) && S_ISREG(st.st_mode)) {
         const mark_t *k = marks_find(&marks, rel, st.st_size);
         int sub = k ? k->sub : -1;
         V.size = st.st_size;

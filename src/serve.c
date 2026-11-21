@@ -37,11 +37,7 @@ static void on_term(int sig) {
     quit = 1;
 }
 
-static long long now_ms(void) {
-    struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
-}
+static long long now_ms(void) { return mono_ms(); }
 
 /* ---- Replies ------------------------------------------------------------------------------- */
 
@@ -287,8 +283,7 @@ static void worker_read(void) {
         return;
     }
     if (wk.trying) index_put(&(thumb_t){ .key = wk.trying, .state = T_NONE });
-    wk.off = (WIFEXITED(status) && WEXITSTATUS(status) == WORKER_NO_AV) ||
-             (!wk.trying && ++wk.fails >= 3);
+    wk.off = !wk.trying && ++wk.fails >= 3;
     wk.want = 1, wk.trying = 0, wk.next = now_ms() + 1000;
 }
 

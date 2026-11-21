@@ -1,16 +1,14 @@
 /* What the server and the player share besides the card's state: where the files are, whole
- * files, the player's lock, the memory a picture needs and which FFmpeg is loaded. */
+ * files, the player's lock, the memory a picture needs, the clock, and how a video is opened. */
 #include "videos.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <time.h>
 #include <unistd.h>
-#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libswresample/swresample.h>
-#include <libswscale/swscale.h>
 
 #define FILE_MAX (8u << 20) /* file_get's most: nothing the app reads whole is near it */
 #define FRAMES_HELD 10      /* frames a decode holds at once, at most (too_large) */
@@ -96,22 +94,30 @@ int too_large(int w, int h, unsigned avail_kb) {
            (long long)w * h / 1024 * 3 * FRAMES_HELD / 2 > avail_kb; /* /1024 first: no overflow */
 }
 
-int av_ok(char *why, size_t n) {
-    const struct {
-        const char *name;
-        unsigned loaded, built;
-    } lib[] = {
-        { "libavcodec", avcodec_version(), LIBAVCODEC_VERSION_MAJOR },
-        { "libavformat", avformat_version(), LIBAVFORMAT_VERSION_MAJOR },
-        { "libavutil", avutil_version(), LIBAVUTIL_VERSION_MAJOR },
-        { "libswscale", swscale_version(), LIBSWSCALE_VERSION_MAJOR },
-        { "libswresample", swresample_version(), LIBSWRESAMPLE_VERSION_MAJOR },
-    };
-    if (n) *why = 0;
-    for (size_t i = 0; i < sizeof lib / sizeof *lib; ++i)
-        if (AV_VERSION_MAJOR(lib[i].loaded) != lib[i].built)
-            return snprintf(why, n, "%s %u is loaded, this needs %u", lib[i].name,
-                            AV_VERSION_MAJOR(lib[i].loaded), lib[i].built),
-                   0;
-    return 1;
+long long mono_ms(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
+}
+
+AVFormatContext *input_open(const char *path, int (*stop)(void *), void *arg, int *err) {
+    char url[PATH_N + 8];
+    AVDictionary *opts = 0;
+    AVFormatContext *ic = avformat_alloc_context();
+    int r = AVERROR(ENOMEM);
+    if (ic) {
+        ic->interrupt_callback = (AVIOInterruptCB){ stop, arg };
+        snprintf(url, sizeof url, "file:%s", path);
+        av_dict_set(&opts, "format_whitelist", FORMATS, 0);
+        av_dict_set(&opts, "protocol_whitelist", "file", 0);
+        if ((r = avformat_open_input(&ic, url, 0, &opts)) < 0) ic = 0; /* a failed open freed it */
+        av_dict_free(&opts);
+    }
+    if (err) *err = r;
+    return ic;
+}
+
+int rotation(AVStream *st) {
+    const AVDictionaryEntry *t = av_dict_get(st->metadata, "rotate", 0, 0);
+    return t ? (int)((strtol(t->value, 0, 10) % 360 + 360) % 360) : 0;
 }
