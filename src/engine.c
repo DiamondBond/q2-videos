@@ -126,7 +126,7 @@ static struct {
     int serial; /* counts the seeks: what was read for an earlier one is dropped */
     struct {
         int pending, how;
-        long long ms;
+        long long ms, from; /* from: where it was, us, for a seek ahead to get well past */
     } seek;
     long long target_ms; /* where the last seek went: the place until the clock is there */
     int paused, fill, retry;
@@ -366,13 +366,39 @@ static int rotation(AVStream *st) {
     return turn == turn ? (int)turn : 0; /* a matrix that is no rotation says NaN */
 }
 
+/* The containers a video's extension names (is_video), as libavformat calls their readers. */
+#define FORMATS "mov,matroska,avi,mpegts,mpeg,flv,asf,ogg,mpegvideo,m4v"
+
+/* The file at path opened, as the page's thumbnails open it (thumb.c): as one of FORMATS or not
+ * at all, and nothing but files for whatever it names in turn, so a playlist or a script named
+ * .mp4 is never followed; "file:" so that no name reads as a protocol's. An open or a read that
+ * hangs ends when the engine does (interrupted). 0, and libavformat's error in *err, when it
+ * can't be. */
+static AVFormatContext *input_open(const char *path, int *err) {
+    char url[PATH_N + 8];
+    AVDictionary *opts = 0;
+    AVFormatContext *ic = avformat_alloc_context();
+    *err = AVERROR(ENOMEM);
+    if (!ic) return 0;
+    ic->interrupt_callback = (AVIOInterruptCB){ interrupted, 0 };
+    snprintf(url, sizeof url, "file:%s", path);
+    av_dict_set(&opts, "format_whitelist", FORMATS, 0);
+    av_dict_set(&opts, "protocol_whitelist", "file", 0);
+    if ((*err = avformat_open_input(&ic, url, 0, &opts)) < 0)
+        ic = 0; /* a failed open has freed it */
+    av_dict_free(&opts);
+    return ic;
+}
+
 /* The file opened and looked into: 1 when it can be played, else E.why says why not. */
 static int media_open(void) {
     char name[32];
-    AVFormatContext *ic = avformat_alloc_context();
-    if (!ic) return fail("The Q2 is out of memory.");
-    ic->interrupt_callback = (AVIOInterruptCB){ interrupted, 0 };
-    if (avformat_open_input(&ic, E.path, 0, 0) < 0) return fail("The file can't be read.");
+    int err;
+    AVFormatContext *ic = input_open(E.path, &err);
+    if (!ic) /* nothing FFmpeg knows, or (EINVAL) something that isn't one of FORMATS */
+        return fail(err == AVERROR_INVALIDDATA || err == AVERROR(EINVAL)
+                        ? "It is not a video file the Q2 knows."
+                        : "The file can't be read.");
     E.ic = ic;
     if (avformat_find_stream_info(ic, 0) < 0) return fail("The Q2 can't tell what is in the file.");
     E.start_us = ic->start_time != AV_NOPTS_VALUE ? ic->start_time : 0;
@@ -519,14 +545,34 @@ static void subtitle(AVCodecContext *dec, const AVStream *st, AVPacket *pkt, int
     unlock();
 }
 
+/* A transport stream's timestamps can start again midway (two recordings end to end, a
+ * broadcast's clock wrapping round). From there on every packet's are moved by what they
+ * jumped, as ffmpeg's own tools do, so the decoders and the clock see one run of time (the place
+ * then waits at the length the file gave, which knows nothing of it). A jump is ten seconds on,
+ * or a tenth back, from where the stream's next packet should be (*next); *off is what has been
+ * added so far. */
+static void joined(AVPacket *pkt, AVRational tb, long long *next, long long *off) {
+    if (next && pkt->dts != AV_NOPTS_VALUE) {
+        long long at = av_rescale_q(pkt->dts, tb, AV_TIME_BASE_Q) + *off, by = at - *next;
+        if (*next != NONE && (by > E.jump_us || by < -100000)) *off -= by, at -= by;
+        *next = at + av_rescale_q(pkt->duration, tb, AV_TIME_BASE_Q);
+    }
+    long long add = av_rescale_q(*off, AV_TIME_BASE_Q, tb);
+    if (pkt->dts != AV_NOPTS_VALUE) pkt->dts += add;
+    if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += add;
+}
+
 static void *reader_main(void *unused) {
     worker_t *w = &E.reader;
     AVCodecContext *sdec = 0;
     AVPacket *pkt = av_packet_alloc();
     int si = -1, aswitch = 0, serial = 0, want_key, keyless = 0;
+    long long ahead = NONE, ahead_to = 0; /* a seek ahead's: the place to get past, and its own */
+    long long off = 0, vnext = NONE, anext = NONE; /* joined()'s */
     int ok = pkt && media_open();
     lock();
     E.state = ok ? ENG_READY : ENG_FAILED;
+    E.vdone = E.vi < 0; /* no picture to wait for the end of */
     want_key = E.vi >= 0 && !E.still;
     kick(), notify();
     while (ok && !E.quit) {
@@ -537,16 +583,18 @@ static void *reader_main(void *unused) {
             pq_flush(&E.vq), pq_flush(&E.aq);
             memset(E.cue, 0, sizeof E.cue);
             unlock();
-            /* the keyframe before it, or (ahead) the one after, so that +10 s always moves on;
-             * where there is none after, the one before and what lies between dropped */
-            int r = av_seek_frame(E.ic, -1, us, how == SEEK_AHEAD ? 0 : AVSEEK_FLAG_BACKWARD);
-            if (r < 0 && how == SEEK_AHEAD)
-                r = av_seek_frame(E.ic, -1, us, AVSEEK_FLAG_BACKWARD), skip = us;
-            if (r < 0 && how != SEEK_AHEAD) av_seek_frame(E.ic, -1, us, 0);
+            /* the keyframe before it; before the first of them, the first */
+            if (av_seek_frame(E.ic, -1, us, AVSEEK_FLAG_BACKWARD) < 0)
+                av_seek_frame(E.ic, -1, us, 0);
             if (sdec) avcodec_flush_buffers(sdec);
             lock();
+            /* ahead, that keyframe must be at least half the way on from where it was (seen when
+             * it is read): +10 s then lands 5 to 10 s on, or at the first keyframe after */
+            ahead = how == SEEK_AHEAD && E.vi >= 0 && !E.still ? (E.seek.from + us) / 2 : NONE;
+            ahead_to = us;
             E.rserial = serial, E.skip_us = skip, E.skip_serial = serial;
             want_key = E.vi >= 0 && !E.still, keyless = 0;
+            off = 0, vnext = anext = NONE; /* the file's own timestamps again */
             kick();
             continue;
         }
@@ -555,12 +603,15 @@ static void *reader_main(void *unused) {
             if (E.ai >= 0) E.ic->streams[E.ai]->discard = AVDISCARD_ALL;
             E.m.audio_cur = E.want_audio, E.ai = E.astream[E.want_audio];
             E.ic->streams[E.ai]->discard = AVDISCARD_DEFAULT;
+            anext = NONE;
             pq_flush(&E.aq);
             if (E.eof) pq_put(&E.aq, 0, serial); /* nothing more is read: it ends at once */
             E.adone = 0, E.aswitched = aswitch;
             kick();
             continue;
         }
+        /* ponytail: likewise the file's own subtitles turned on midway show from the reader's
+         * place on: a line already read past is not shown */
         if (si != E.want_sub) { /* other subtitles, or none */
             if (si >= 0) E.ic->streams[si]->discard = AVDISCARD_ALL;
             si = E.want_sub;
@@ -595,14 +646,39 @@ static void *reader_main(void *unused) {
             kick(), notify();
             continue;
         }
+        if (E.ic->iformat->flags & AVFMT_TS_DISCONT)
+            joined(pkt, E.ic->streams[pkt->stream_index]->time_base,
+                   pkt->stream_index == E.vi   ? &vnext
+                   : pkt->stream_index == E.ai ? &anext
+                                               : 0,
+                   &off);
         if (pkt->stream_index == E.vi) {
             /* after a seek the picture starts at a keyframe; a stream that marks none gets going
              * all the same */
-            if (want_key && !(pkt->flags & AV_PKT_FLAG_KEY) && ++keyless < 300)
+            if (want_key && !(pkt->flags & AV_PKT_FLAG_KEY) && ++keyless < 300) {
                 av_packet_unref(pkt);
-            else
-                want_key = 0, pq_put(&E.vq, pkt, serial), kick();
-        } else if (pkt->stream_index == E.ai)
+                continue;
+            }
+            long long at = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+            if (ahead != NONE && at != AV_NOPTS_VALUE &&
+                av_rescale_q(at, E.ic->streams[E.vi]->time_base, AV_TIME_BASE_Q) <= ahead) {
+                /* A seek ahead came out under half the way on, keyframes being far apart: the
+                 * keyframe after the place, then, so that +10 s always moves on; and where there
+                 * is none after, this one again with all before the place decoded and dropped. */
+                ahead = NONE, keyless = 0;
+                av_packet_unref(pkt);
+                unlock();
+                int exact = av_seek_frame(E.ic, -1, ahead_to, 0) < 0;
+                if (exact) av_seek_frame(E.ic, -1, ahead_to, AVSEEK_FLAG_BACKWARD);
+                lock();
+                if (exact) E.skip_us = ahead_to, E.skip_serial = serial;
+                continue;
+            }
+            ahead = NONE, want_key = 0;
+            pq_put(&E.vq, pkt, serial), kick();
+        } else if (ahead != NONE) /* nothing is taken before the picture's keyframe is known */
+            av_packet_unref(pkt);
+        else if (pkt->stream_index == E.ai)
             pq_put(&E.aq, pkt, serial), kick();
         else if (pkt->stream_index == si && sdec) {
             unlock();
@@ -943,9 +1019,8 @@ static void take_frame(au_t *a, AVFrame *f, int stream) {
     }
     if (at != NONE) {
         long long d = at - (a->base + a->frames * 1000000 / RATE);
-        if (d > TOL && d <= E.jump_us)
-            a->pad =
-                d * RATE / 1000000; /* a gap, or a sound that starts after the picture: silence */
+        if (d > TOL && d <= E.jump_us) /* a gap, or a sound that starts after the picture */
+            a->pad = d * RATE / 1000000;
         else if (d < -TOL && -d <= (a->frames ? OVERLAP_MAX : E.jump_us)) {
             /* before its place (after a seek, before the picture it starts with): that much goes */
             long long cut = -d * RATE / 1000000;
@@ -994,7 +1069,11 @@ static void *audio_main(void *arg) {
         }
         if (!a->opened || a->track != E.aswitched) {
             /* The sound track's decoder, at the start and for another track: the timeline stays,
-             * and the wait for the new track's first frame is silence. */
+             * and the wait for the new track's first frame is silence.
+             * ponytail: the new track's sound begins where the reader is, some two seconds on
+             * from what is heard, so a change of track is that long a silence under a picture
+             * that plays on; to hear it at once, seek to the place (the picture then waits for
+             * its keyframe's run to be decoded again). */
             a->opened = 1, a->track = E.aswitched, stream = E.ai;
             unlock();
             avcodec_free_context(&dec);
@@ -1046,8 +1125,8 @@ static void *audio_main(void *arg) {
                 a->base = E.start_us + E.target_ms * 1000, a->tl = dec ? 2 : 1;
             a->frames = 0;
         }
-        if (E.rebase !=
-            NONE) { /* a picture far from the clock: with no sound to keep to, follow it */
+        /* a picture far from the clock: with no sound to keep to, follow it */
+        if (E.rebase != NONE) {
             if (!dec || a->drained) a->base = E.rebase, a->frames = out_unheard(a);
             E.rebase = NONE;
         }
@@ -1184,8 +1263,8 @@ void eng_poll(snap_t *s, pix **cur) {
     s->due_ms = -1;
     while (E.count) {
         pic_t *p = &E.pic[E.ridx];
-        if (E.shown_serial ==
-            E.serial) { /* a place's first picture goes up at once, paused or not */
+        /* a place's first picture goes up at once, paused or not; those after it, in their time */
+        if (E.shown_serial == E.serial) {
             if (E.paused || !ok) break;
             long long early = p->pts - c;
             if (early > E.jump_us || -early > E.jump_us) {
@@ -1218,8 +1297,8 @@ void eng_poll(snap_t *s, pix **cur) {
     s->pos_ms = pos < 0 ? 0 : E.m.dur_ms && pos > E.m.dur_ms ? E.m.dur_ms : pos;
     s->pic_ms = shown ? (E.shown_us - E.start_us) / 1000 : -1;
     s->state = E.state, s->picture = E.picture, s->serial = E.serial, s->geom = E.geom;
-    s->lost = E.lost, s->silent = E.silent, s->frames = E.frames, s->tone = E.tone,
-    s->level = E.level;
+    s->lost = E.lost, s->silent = E.silent, s->frames = E.frames, s->tone = E.tone;
+    s->level = E.level, s->queued = E.vq.bytes + E.aq.bytes;
     /* the end: nothing left to read, decode, show or hear */
     s->ended = E.state == ENG_READY && E.eof && E.vdone && E.adone && !E.count && !E.seek.pending &&
                E.rserial == E.serial && ok && (E.aend_us == NONE || c >= E.aend_us) &&
@@ -1237,6 +1316,9 @@ void eng_poll(snap_t *s, pix **cur) {
 void eng_seek(long long ms, int how) {
     lock();
     if (ms < 0) ms = 0;
+    /* where it is: the clock's time, a paused seek's picture, or where a seek not yet there goes */
+    if (!clock_read(now_ms(), &E.seek.from))
+        E.seek.from = E.shown_serial == E.serial ? E.shown_us : E.start_us + E.target_ms * 1000;
     ++E.serial;
     E.seek.pending = 1, E.seek.how = how, E.seek.ms = ms;
     E.target_ms = ms;

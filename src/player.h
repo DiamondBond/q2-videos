@@ -80,9 +80,9 @@ int cues_at(const cues_t *c, long long ms, const cue_t **out, int max, long long
 void ass_plain(const char *event, char *out, size_t n);
 /* Plain text's tags left out in place: <i> and its like, {\...}. */
 void tags_strip(char *text);
-/* The subtitle files beside the video at path: "name.srt" and "name.<lang>.srt", case aside, in
- * order of name; each one's path and what to call it ("English" for en or eng, the word itself
- * for any other, "External" for none). Returns how many, at most max. */
+/* The subtitle files beside the video at path: "name.srt", then every "name.<lang>.srt" in order
+ * of name, case aside; each one's path and what to call it ("English" for en or eng, the word
+ * itself for any other, "External" for none). Returns how many, at most max. */
 typedef struct {
     char path[PATH_N], name[48];
 } sidecar_t;
@@ -188,7 +188,10 @@ typedef struct {      /* an opened video */
 } media_t;
 
 enum { ENG_OPENING, ENG_READY, ENG_FAILED };
-enum { SEEK_BACK, SEEK_AHEAD, SEEK_EXACT }; /* the keyframe before; the one after; the very place */
+/* To the keyframe before the place; ahead, to that one when it is at least half the way on from
+ * where the video is, else to the one after, so a step ahead always moves on; to the very place,
+ * what is before it decoded and dropped. */
+enum { SEEK_BACK, SEEK_AHEAD, SEEK_EXACT };
 typedef struct {
     int state;        /* ENG_ */
     int fresh;        /* a new picture is in *cur: draw it */
@@ -204,6 +207,7 @@ typedef struct {
     long long frames; /* sound frames sent out, silence aside */
     int tone;         /* their last tenth of a second's zero crossings, times ten: 2 x Hz */
     int level;        /* the ladder's */
+    long long queued; /* bytes of packets read and waiting to be decoded */
 } snap_t;
 
 /* Starts playing the video at path from start_ms: its threads begin, and eng_poll says when it
