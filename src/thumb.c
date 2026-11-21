@@ -28,8 +28,10 @@
 
 /* ---- The index ----------------------------------------------------------------------------- */
 
-/* ponytail: the lines are looked through one by one, a row's and a video's each time; sort them
- * and bsearch if a library of tens of thousands of videos ever makes a list slow. */
+/* ponytail: the lines are looked through one by one. A reply looks for its rows' videos, 50 at
+ * most; the worker's round for every video of the library, and its tidying likewise: videos x
+ * lines, 400 million steps at 20,000 videos, in the background. Keep the lines sorted (index_put,
+ * and tidy's drop) and bsearch if a library that size ever makes a round slow. */
 static struct {
     thumb_t *v;
     int n, room;

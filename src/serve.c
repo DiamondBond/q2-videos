@@ -318,8 +318,7 @@ static const char *state_text(const mark_t *m, const thumb_t *t, char *out, size
 
 enum { I_CONTINUE, I_FOLDER, I_VIDEO, I_NONE, I_SETTINGS };
 typedef struct {
-    int type, i;      /* i: a folder's or a video's entry in the listing */
-    const thumb_t *t; /* a video's line of the index, once it has one */
+    int type, i; /* i: a folder's or a video's entry in the listing */
 } item_t;
 
 /* The level at rel ("" the top), from its row off on. Its rows: at the top Continue Watching,
@@ -336,6 +335,7 @@ static void level(rep_t *r, const char *rel, int off) {
     settings_t set;
     listing_t l;
     mark_t cw = { 0 };
+    const thumb_t *cw_line = 0; /* Continue Watching's video in the index, once it has a line */
     int top = !*rel, n = 0, sent = 0, missing = 0;
 
     if (!has_cap("screen")) { /* Q2 Pod 1.8.9 and older: no row of ours would do anything */
@@ -360,8 +360,8 @@ static void level(rep_t *r, const char *rel, int off) {
     const mark_t *k = top && found ? lib_continue(root, &marks) : 0;
     if (k && ctx_ok(k->rel) && lib_path(root, k->rel, path, sizeof path) && !stat(path, &st)) {
         cw = *k, snprintf(cw_rel, sizeof cw_rel, "%s", k->rel);
-        item[n++] =
-            (item_t){ I_CONTINUE, 0, index_find(cache_key(cw_rel, st.st_size, st.st_mtime)) };
+        cw_line = index_find(cache_key(cw_rel, st.st_size, st.st_mtime));
+        item[n++].type = I_CONTINUE;
     }
     int first = n;
     for (int i = 0; i < l.n; ++i) {
@@ -369,19 +369,15 @@ static void level(rep_t *r, const char *rel, int off) {
          * bytes, or shorter with % in it, each three), though its row is left out */
         snprintf(ctx, sizeof ctx, "%s%s%s", rel, top ? "" : "/", l.v[i].name);
         if (!ctx_ok(ctx)) continue;
-        item[n] = (item_t){ l.v[i].dir ? I_FOLDER : I_VIDEO, i, 0 };
-        if (!l.v[i].dir) item[n].t = index_find(cache_key(ctx, l.v[i].size, l.v[i].mtime));
-        ++n;
+        item[n++] = (item_t){ l.v[i].dir ? I_FOLDER : I_VIDEO, i };
     }
     if (n == first) item[n++].type = I_NONE;
     if (top) item[n++].type = I_SETTINGS;
-    for (int i = 0; i < n; ++i)
-        missing |= (item[i].type == I_VIDEO || item[i].type == I_CONTINUE) && !item[i].t;
 
     /* Another level than the one shown last, or its rows from another COVERS on (More…, or Back
      * from there): the art folder is this one's now. Q2 Pod has let the other's rows go before
      * it asks; Settings, which has no covers, leaves the folder be. */
-    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off)) {
+    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off || arts == COVERS)) {
         art_clear();
         snprintf(shown, sizeof shown, "%s", rel), shown_off = off;
     }
@@ -389,7 +385,7 @@ static void level(rep_t *r, const char *rel, int off) {
     for (int i = off; i < n; ++i, ++sent) {
         const item_t *it = &item[i];
         const entry_t *e = l.n ? &l.v[it->i] : 0; /* a folder's or a video's alone */
-        const thumb_t *t = it->t;
+        const thumb_t *t = 0;                     /* a video's line of the index */
         unsigned key = 0;
         int ok, of = C_NONE;
         if (it->type == I_NONE)
@@ -406,9 +402,12 @@ static void level(rep_t *r, const char *rel, int off) {
         } else { /* a video: held Play/Pause marks it watched, or not */
             int again = it->type == I_CONTINUE;
             if (again)
-                snprintf(ctx, sizeof ctx, "%s", cw_rel);
-            else
+                snprintf(ctx, sizeof ctx, "%s", cw_rel), t = cw_line;
+            else {
                 snprintf(ctx, sizeof ctx, "%s%s%s", rel, top ? "" : "/", e->name);
+                t = index_find(cache_key(ctx, e->size, e->mtime));
+            }
+            missing |= !t; /* looked for in the rows sent alone: a level may be thousands */
             state_text(again ? &cw : marks_find(&marks, ctx, e->size), t, text, sizeof text);
             lib_title(ctx, name, sizeof name);
             snprintf(sub, sizeof sub, "%s \xc2\xb7 %s", text, name);
@@ -430,6 +429,10 @@ static void level(rep_t *r, const char *rel, int off) {
         snprintf(r->cursor, sizeof r->cursor, "%d", off + sent),
             snprintf(r->msg, sizeof r->msg, "pages");
     else if (off || n > LIVE_ROWS)
+        /* ponytail: Q2 Pod asks a paged level once, so a thumbnail made after the level opened
+         * shows the next time it is opened, not in place. The worker is through the library
+         * soon after the server's start whatever is shown; a level this long kept live, 50
+         * rows at a time, if Q2 Pod ever asks a page again. */
         snprintf(r->msg, sizeof r->msg, "pages");
     else /* asked again every 2 s: Q2 Pod counts the rows' covers anew each time */
         snprintf(r->msg, sizeof r->msg, "refresh");
@@ -576,6 +579,9 @@ int serve_main(void) {
 #endif
     sigaction(SIGTERM, &sa, 0), sigaction(SIGINT, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
+    /* The launcher gone without its TERM (its shell killed): the server ends now as on one. It
+     * would else idle out later, and take the next server's socket and art folder with it. */
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (snprintf(addr.sun_path, sizeof addr.sun_path, "%s/q2-videos.browse.sock", tmp_dir) >=
         (int)sizeof addr.sun_path)
         return 1;

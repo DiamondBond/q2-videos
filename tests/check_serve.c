@@ -189,13 +189,17 @@ static const char *art_path(const char *uri, const char *ctx) {
     snprintf(path, sizeof path, "%s/q2-videos.art/%08x.jpg", tmp_dir, art_key(uri, ctx));
     return path;
 }
-/* A live reply's covers, as Q2 Pod counts them each time it has asked (addon.c art_rows): the
- * rows whose art file is there. Its message is the plain word, as sent. */
-static int covers(void) {
+/* The reply's covers, as Q2 Pod counts them each time it has asked (addon.c art_rows): the rows
+ * whose art file is there. */
+static int row_arts(void) {
     int n = 0;
-    CHECK(strstr(rp.raw, "\tok\trefresh\t\n"));
     for (int i = 0; i < rp.rows; ++i) n += !access(art_path(ROW(i, URI), ROW(i, CTX)), 0);
     return n;
+}
+/* A live reply's: its message is the plain word, as sent. */
+static int covers(void) {
+    CHECK(strstr(rp.raw, "\tok\trefresh\t\n"));
+    return row_arts();
 }
 static long long size_of(const char *path) {
     struct stat st;
@@ -957,7 +961,12 @@ static void check_covers(void) {
         CHECK(art_count() == off + 50);
     }
     SAME(CURSOR, "500");
-    CHECK(ask("dir\tLots\t500") == 20 && art_count() == 20), SAME(CURSOR, "");
+    /* The level asked again with other rows in it (videos copied meanwhile, another Sort): the
+     * covers are its rows' now, though none of the 500 kept is let go by a change of level. */
+    sh("for i in 1 2 3; do mkdir -p " V "Lots/c$i && : > " V "Lots/c$i/v.mp4 || exit 1; done");
+    CHECK(ask("dir\tLots") == 50 && row_arts() == 50 && art_count() == 50);
+    SAME(ROW(0, TITLE), "c1"), SAME(ROW(3, TITLE), "d100");
+    CHECK(ask("dir\tLots\t500") == 23 && art_count() == 23), SAME(CURSOR, "");
     CHECK(access(art_path("dir", "Lots/d100"), 0) &&
           same_file(art_path("dir", "Lots/d619"), "assets/tile-folder.jpg"));
     CHECK(ask("dir\tLots") == 50 && art_count() == 50 && !access(art_path("dir", "Lots/d100"), 0));
@@ -1319,6 +1328,21 @@ static void check_server(char **cmd, int host) {
     stop();
     sh("rm -rf " ECARD "/Videos/copy*.mp4");
 
+    /* The launcher gone without its TERM (its shell killed, its trap not run): the server ends
+     * as on a TERM, its socket and art folder with it, and so is not there to take a later
+     * server's when it would have idled out. */
+    pid_t shell = fork();
+    if (!shell) {
+        start(cmd, 0);
+        pause();
+        _exit(0);
+    }
+    CHECK(shell > 0);
+    for (long long end = now_ms() + 20000; !up(); nap(20)) CHECK(now_ms() < end);
+    CHECK(ask("menu") == ROWS && !kill(shell, SIGKILL) && waitpid(shell, 0, 0) == shell);
+    for (long long end = now_ms() + 2000; !access(sock, 0) || !access(ETMP "/q2-videos.art", 0);
+         nap(20))
+        CHECK(now_ms() < end);
     if (!host) return;
 
     /* A decoder that never comes back (the host build's hook, on hang.mp4): the server ends that
