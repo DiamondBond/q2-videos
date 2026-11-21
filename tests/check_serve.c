@@ -902,7 +902,7 @@ static void check_covers(void) {
           same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
     CHECK(same_file(art_path("settings", ""), "assets/tile-settings.jpg"));
     cover_ok(art_path("dir", "Series"), &k), cover_ok(art_path("settings", ""), &k);
-    CHECK(k.luma > 60 && k.luma < 130); /* a light glyph on a dark tile */
+    CHECK(k.luma > 130 && k.luma < 175); /* a white glyph on a mid-grey tile */
     CHECK(access(art_path("play", "h264-aac.mp4"), 0) &&
           access(art_path("play", "Episode 1.MP4"), 0));
     SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "");

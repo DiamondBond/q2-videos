@@ -2,8 +2,9 @@
 """The rows' static covers: tools/tiles.py [DIR], DIR by default assets/ beside this folder.
 
 Three 128 x 128 JPEGs, which Q2 Pod shows 64 px square beside a row: a folder's, Settings' and
-the one a video gets when no picture of it can be made. Flat: a light glyph on a dark grey tile,
-no gradient or gloss. Each is drawn eight times the size and scaled down, for smooth edges, and
+the one a video gets when no picture of it can be made. Flat: a white glyph on a mid-grey tile,
+which sits in a Light Mode list as well as a dark one (a dark tile is a black square there); no
+gradient or gloss. Each is drawn eight times the size and scaled down, for smooth edges, and
 saved without chroma subsampling, which would blur a glyph's edge at this size. Needs Pillow.
 """
 import math
@@ -13,7 +14,7 @@ import sys
 from PIL import Image, ImageDraw
 
 PX, UP = 128, 8
-TILE, GLYPH = "#3A3A3A", "#E2E2E2"
+TILE, GLYPH = "#7C7C80", "#FFFFFF"
 
 
 def canvas():
