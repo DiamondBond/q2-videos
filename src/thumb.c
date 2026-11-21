@@ -257,8 +257,10 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
     int made = 0, stream = -1;
 
     t->dur_ms = 0, t->w = t->h = 0, t->state = T_NONE;
-#ifdef HOST /* the checks' killer file: the worker dies on it, as in a decoder's fault */
+#ifdef HOST /* the checks' killer files: the worker dies on one, as in a decoder's fault, and      \
+             * never comes back from the other */
     if (getenv("VIDEOS_CRASH") && strstr(path, getenv("VIDEOS_CRASH"))) abort();
+    while (getenv("VIDEOS_HANG") && strstr(path, getenv("VIDEOS_HANG"))) pause();
 #endif
     /* "file:" so that no name is read as a protocol's, and that protocol alone for whatever the
      * file names in turn */

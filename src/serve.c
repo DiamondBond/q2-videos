@@ -22,6 +22,10 @@
 #define IDLE_MS 600000 /* no request and no video playing this long: the server ends itself */
 #define REQ_MS 2000    /* a request is read, and its reply taken, within this */
 #define HEAD_MAX 128   /* a reply's first two lines at most */
+/* A worker this long on one video is ended. Its own clock lets a video go after THUMB_MS, but is
+ * looked at between two calls of FFmpeg's, not inside one that never comes back; and the worker
+ * holds the lock the player waits for. */
+#define STUCK_MS (4 * THUMB_MS)
 /* The covers the art folder holds at most: those of the rows Q2 Pod holds of one level, ten
  * replies of ROWS_MAX (addon.c ADDON_PAGES), after which its More… row opens the next as a level
  * of their own. A tile is 2 kB and a thumbnail about 6, so 3 MB of /tmp at the very most. */
@@ -219,8 +223,9 @@ static struct {
     int off;                   /* none is started any more: it can't work here */
     int told, fails;           /* lines it told since it started; deaths in a row on no video */
     long long next;            /* when one may start, a moment after one died */
-    unsigned long long trying; /* the video it is on, 0 none */
-    char level[REL_MAX + 1];   /* the level last asked for, and whether it was told of it */
+    unsigned long long trying; /* the video it is on, 0 none, and since when */
+    long long since;
+    char level[REL_MAX + 1]; /* the level last asked for, and whether it was told of it */
     int sent;
 } wk = { .to = -1, .from = -1, .want = 1 };
 static int listener = -1; /* the socket, which a worker has no business holding */
@@ -268,7 +273,7 @@ static void worker_read(void) {
     int status = 0;
     while ((k = read(wk.from, &t, sizeof t)) == (ssize_t)sizeof t)
         if (t.state == T_TRYING)
-            wk.trying = t.key;
+            wk.trying = t.key, wk.since = now_ms();
         else
             index_put(&t), wk.trying = 0, wk.fails = 0, ++wk.told;
     if (k) return; /* nothing more for now */
@@ -569,9 +574,10 @@ int serve_main(void) {
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
     struct sigaction sa = { .sa_handler = on_term }; /* no SA_RESTART: a TERM ends a wait */
     char path[PATH_N];
-    long long idle = IDLE_MS;
+    long long idle = IDLE_MS, stuck = STUCK_MS;
 #ifdef HOST /* the checks wait a second, not ten minutes */
     if (getenv("VIDEOS_IDLE_MS")) idle = atoll(getenv("VIDEOS_IDLE_MS"));
+    if (getenv("VIDEOS_STUCK_MS")) stuck = atoll(getenv("VIDEOS_STUCK_MS"));
 #endif
     sigaction(SIGTERM, &sa, 0), sigaction(SIGINT, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
@@ -596,6 +602,8 @@ int serve_main(void) {
             if (p[0].revents && (fd = accept(listener, 0, 0)) >= 0) answer(fd), last = now_ms();
         }
         now = now_ms();
+        /* a worker that is stuck: ended here, and seen to by worker_read as any that died */
+        if (wk.pid > 0 && wk.trying && now - wk.since > stuck) kill(wk.pid, SIGKILL);
         /* A video playing: Q2 Pod asks nothing meanwhile, which is not idleness, and the ten
          * minutes start again when the player ends. No worker is started under it either. */
         if ((fd = lock_take(0)) < 0)

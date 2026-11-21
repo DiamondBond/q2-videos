@@ -1046,8 +1046,9 @@ static int up(void) {
     close(fd);
     return ok;
 }
-/* The server started as run starts it (cmd then "serve"), on ECARD and ETMP; with env, a
- * NAME=value of the host build's test hooks, when given. Back once its socket answers. */
+/* The server started as run starts it (cmd then "serve"), on ECARD and ETMP; with env, the
+ * NAME=value of the host build's test hooks, blanks between, when given. Back once its socket
+ * answers. */
 static void start(char **cmd, const char *env) {
     char *argv[16];
     int n = 0;
@@ -1058,7 +1059,7 @@ static void start(char **cmd, const char *env) {
     sock = ETMP "/q2-videos.browse.sock";
     if (!(server = fork())) {
         prctl(PR_SET_PDEATHSIG, SIGKILL); /* a check that fails leaves no server behind */
-        if (env) putenv((char *)env);
+        for (char *e = env ? strtok(strdup(env), " ") : 0; e; e = strtok(0, " ")) putenv(e);
         execvp(argv[0], argv);
         _exit(127);
     }
@@ -1211,9 +1212,26 @@ static void check_server(char **cmd, int host) {
     stop();
     if (!host) return;
 
+    /* A decoder that never comes back (the host build's hook, on hang.mp4): the server ends that
+     * worker after its time, here a second; the video has the "no picture" tile, the others
+     * their thumbnails, and the lock is free again for a player. */
+    sh("rm -rf " ECARD "/Videos/copy*.mp4 " ECARD "/.videos/cache && cp " ECARD
+       "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
+    start(cmd, "VIDEOS_HANG=hang VIDEOS_STUCK_MS=1000");
+    CHECK(ask("menu") == 14);
+    for (long long end = now_ms() + 60000; covers() < 14; nap(200))
+        CHECK(now_ms() < end && ask("menu") == 14);
+    CHECK(same_file(art_path("play", "hang.mp4"), "assets/tile-nopicture.jpg"));
+    cover_ok(art_path("play", "killer.mp4"), &k);
+    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == 14 && pictures == 12);
+    began = now_ms();
+    CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < 1000);
+    close(lock);
+    stop();
+    unlink(ECARD "/Videos/hang.mp4");
+
     /* Idleness, the ten minutes as 1.5 s through the host build's hook: the server ends itself
      * with status 0 (run's loop then ends), counted from the last request... */
-    sh("rm -f " ECARD "/Videos/copy*.mp4");
     start(cmd, "VIDEOS_IDLE_MS=1500");
     began = now_ms();
     nap(1000);
