@@ -236,7 +236,7 @@ const char *text_length(long long ms, char *out, size_t n) {
     if (ms <= 0)
         snprintf(out, n, "%s", "");
     else if (s < 60)
-        snprintf(out, n, "%lld sec", s ? s : 1);
+        snprintf(out, n, "%lld s", s ? s : 1);
     else if (min < 60)
         snprintf(out, n, "%lld min", min);
     else if (min % 60)

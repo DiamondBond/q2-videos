@@ -59,7 +59,7 @@ int av_ok(char *why, size_t n);
 
 enum { SORT_NAME, SORT_NEWEST };
 typedef struct {
-    int next;    /* Play Next: 0 Off, 1 On */
+    int next;    /* Autoplay: 0 Off, 1 On */
     int subs;    /* Subtitles: 0 Off, 1 On */
     int subsize; /* Subtitle Size: 0 Small, 1 Medium, 2 Large */
     int fill;    /* Fit to Screen: 0 Off (all of the picture), 1 On (the screen filled) */
@@ -165,7 +165,7 @@ int lib_next(const char *root, const char *rel, int sort, char *out, size_t n);
 const mark_t *lib_continue(const char *root, const marks_t *m);
 
 /* A row's subtitle texts, into out, which is returned. A length: "1 h 42 min", "2 h", "24 min",
- * "45 sec"; "" when it is unknown (0). What is left: "23 min left", "1 h 5 min left", "Less than
+ * "45 s"; "" when it is unknown (0). What is left: "23 min left", "1 h 5 min left", "Less than
  * a minute left". A size: "1.2 GB", "350 MB", "12 KB". */
 const char *text_length(long long ms, char *out, size_t n);
 const char *text_left(long long pos_ms, long long dur_ms, char *out, size_t n);

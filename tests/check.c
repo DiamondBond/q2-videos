@@ -247,8 +247,8 @@ static void check_names(void) {
     SAME(lib_title("Long Name.mkv", tiny, 5), "Long");
 
     SAME(text_length(0, t, sizeof t), ""), SAME(text_length(-5, t, sizeof t), "");
-    SAME(text_length(400, t, sizeof t), "1 sec"), SAME(text_length(45000, t, sizeof t), "45 sec");
-    SAME(text_length(59499, t, sizeof t), "59 sec"), SAME(text_length(59500, t, sizeof t), "1 min");
+    SAME(text_length(400, t, sizeof t), "1 s"), SAME(text_length(45000, t, sizeof t), "45 s");
+    SAME(text_length(59499, t, sizeof t), "59 s"), SAME(text_length(59500, t, sizeof t), "1 min");
     SAME(text_length(89000, t, sizeof t), "1 min"), SAME(text_length(90000, t, sizeof t), "2 min");
     SAME(text_length(24 * 60000, t, sizeof t), "24 min");
     SAME(text_length(59 * 60000 + 29000, t, sizeof t), "59 min");

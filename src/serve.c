@@ -199,17 +199,6 @@ static int cover(unsigned key, int of, unsigned long long thumb) {
     return ok;
 }
 
-/* "refresh" into msg, spelt for the number of covers the reply's rows have. Q2 Pod looks at a
- * live level's reply only when its bytes differ from the one it shows (addon.c got(), a hash of
- * them), and only then counts the rows' covers again to draw the list anew. A thumbnail that
- * lands while no row's text changes (a video in progress, one already watched, one that can't be
- * decoded) would never show. So the count is in the bytes: each letter of the word whose bit is
- * set in it is written as its escape, which reads back as the same word. */
-static void live(char *msg, int covers) {
-    for (int i = 0; i < 7; ++i)
-        msg += sprintf(msg, covers >> i & 1 ? "%%%02X" : "%c", "refresh"[i]);
-}
-
 /* ---- The worker ---------------------------------------------------------------------------- */
 
 /* The worker is a child process (thumb.c says why), started when a level lists a video the index
@@ -311,13 +300,12 @@ static int ctx_ok(const char *rel) {
 }
 
 /* A video's subtitle, by its state: what is left of one in progress, Watched, else its length,
- * and its size until the worker has read that. */
-static const char *state_text(const mark_t *m, const thumb_t *t, long long size, char *out,
-                              size_t n) {
+ * and nothing until the worker has read that. */
+static const char *state_text(const mark_t *m, const thumb_t *t, char *out, size_t n) {
     long long dur = m && m->dur_ms ? m->dur_ms : t ? t->dur_ms : 0;
     if (mark_unfinished(m)) return text_left(m->pos_ms, dur, out, n);
     if (m && m->flags & MARK_WATCHED) return snprintf(out, n, "Watched"), out;
-    return dur ? text_length(dur, out, n) : text_size(size, out, n);
+    return dur ? text_length(dur, out, n) : (*out = 0, out);
 }
 
 enum { I_CONTINUE, I_FOLDER, I_VIDEO, I_NONE, I_SETTINGS };
@@ -340,7 +328,7 @@ static void level(rep_t *r, const char *rel, int off) {
     settings_t set;
     listing_t l;
     mark_t cw = { 0 };
-    int top = !*rel, n = 0, sent = 0, covers = 0, missing = 0;
+    int top = !*rel, n = 0, sent = 0, missing = 0;
 
     if (!has_cap("screen")) { /* Q2 Pod 1.8.9 and older: no row of ours would do anything */
         row(r, "info", "", "Update Q2 Pod to play videos", "This app needs Q2 Pod 1.9.0 or later",
@@ -413,10 +401,9 @@ static void level(rep_t *r, const char *rel, int off) {
                 snprintf(ctx, sizeof ctx, "%s", cw_rel);
             else
                 snprintf(ctx, sizeof ctx, "%s%s%s", rel, top ? "" : "/", e->name);
-            state_text(again ? &cw : marks_find(&marks, ctx, e->size), t, again ? cw.size : e->size,
-                       text, sizeof text);
+            state_text(again ? &cw : marks_find(&marks, ctx, e->size), t, text, sizeof text);
             lib_title(ctx, name, sizeof name);
-            snprintf(sub, sizeof sub, "%s \xc2\xb7 %s", name, text);
+            snprintf(sub, sizeof sub, "%s \xc2\xb7 %s", text, name);
             ok = row(r, "screen", "play", again ? "Continue Watching" : name, again ? sub : text,
                      ctx, "mark");
             of = !t                      ? C_NONE
@@ -426,10 +413,9 @@ static void level(rep_t *r, const char *rel, int off) {
         }
         if (!ok) break;
         if (arty && it->type != I_NONE) {
-            int has = cover(key, of, t ? t->key : 0);
-            covers += has;
             /* a thumbnail gone from the cache: the worker's tidying has it made again */
-            missing |= of == C_THUMB && !has && access(thumb_file(t->key, path), 0);
+            missing |= !cover(key, of, t ? t->key : 0) && of == C_THUMB &&
+                       access(thumb_file(t->key, path), 0);
         }
     }
     if (off + sent < n) /* the rows after these, by this cursor */
@@ -437,8 +423,8 @@ static void level(rep_t *r, const char *rel, int off) {
             snprintf(r->msg, sizeof r->msg, "pages");
     else if (off || n > LIVE_ROWS)
         snprintf(r->msg, sizeof r->msg, "pages");
-    else
-        live(r->msg, covers);
+    else /* asked again every 2 s: Q2 Pod counts the rows' covers anew each time */
+        snprintf(r->msg, sizeof r->msg, "refresh");
     if (missing) worker_ask(rel);
     free(item), lib_free(&l);
 }
@@ -451,13 +437,13 @@ static void settings_page(rep_t *r) {
                              *const SORT[] = { "By Name", "Newest First" };
     settings_t s;
     settings_load(&s);
-    row(r, "action", "set", "Play Next", OFF_ON[s.next], "next", "");
+    row(r, "action", "set", "Autoplay", OFF_ON[s.next], "next", "");
     row(r, "action", "set", "Subtitles", OFF_ON[s.subs], "subs", "");
     row(r, "action", "set", "Subtitle Size", SIZE[s.subsize], "subsize", "");
     row(r, "action", "set", "Fit to Screen", OFF_ON[s.fill], "fill", "");
     row(r, "action", "set", "Sort", SORT[s.sort], "sort", "");
     row(r, "info", "", "Version", VERSION, "", "");
-    live(r->msg, 0);
+    snprintf(r->msg, sizeof r->msg, "refresh");
 }
 
 /* ---- Actions: their replies have no rows, and their message is the toast ------------------- */
@@ -471,8 +457,9 @@ static void set(rep_t *r, const char *key) {
         fail(r, "error", "Can't write to the card");
 }
 
-/* Held Play/Pause on a video's row: watched, or not watched again, which forgets its place too.
- * A mark there already is changed where it is, so Continue Watching keeps its order. */
+/* Held Play/Pause on a video's row: watched, or not watched again, its place kept either way (one
+ * marked by mistake is where it was). A mark there already is changed where it is, so Continue
+ * Watching keeps its order. */
 static void mark(rep_t *r, const char *rel) {
     char root[PATH_N], path[PATH_N];
     struct stat st;
@@ -485,7 +472,7 @@ static void mark(rep_t *r, const char *rel) {
     mark_t *k = marks_find(&marks, rel, st.st_size);
     int watched = !(k && k->flags & MARK_WATCHED);
     if (!watched)
-        k->flags &= ~MARK_WATCHED, k->pos_ms = 0;
+        k->flags &= ~MARK_WATCHED;
     else if (k || (k = marks_put(&marks, rel, st.st_size)))
         k->flags |= MARK_WATCHED;
     if (!k || !marks_save(&marks))

@@ -183,20 +183,23 @@ static void row_is(int i, const char *kind, const char *uri, const char *title, 
     SAME(ROW(i, KIND), kind), SAME(ROW(i, URI), uri), SAME(ROW(i, TITLE), title);
     SAME(ROW(i, SUB), sub), SAME(ROW(i, CTX), ctx), SAME(ROW(i, POS), pos);
 }
-/* A live reply's message as it was sent: it must read "refresh", and the letters sent as
- * escapes spell the number of covers its rows have (serve.c live()). That number. */
-static int covers(void) {
-    const char *s = strchr(strchr(rp.raw + 9, '\t') + 1, '\t') + 1; /* past the id and the status */
-    int n = 0;
-    SAME(MSG, "refresh");
-    for (int i = 0; i < 7; ++i, s += *s == '%' ? 3 : 1) n |= (*s == '%') << i;
-    CHECK(*s == '\t');
-    return n;
-}
 static const char *art_path(const char *uri, const char *ctx) {
     static char path[PATH_N];
     snprintf(path, sizeof path, "%s/q2-videos.art/%08x.jpg", tmp_dir, art_key(uri, ctx));
     return path;
+}
+/* A live reply's covers, as Q2 Pod counts them each time it has asked (addon.c art_rows): the
+ * rows whose art file is there. Its message is the plain word, as sent. */
+static int covers(void) {
+    int n = 0;
+    CHECK(strstr(rp.raw, "\tok\trefresh\t\n"));
+    for (int i = 0; i < rp.rows; ++i) n += !access(art_path(ROW(i, URI), ROW(i, CTX)), 0);
+    return n;
+}
+static long long size_of(const char *path) {
+    struct stat st;
+    CHECK(!stat(path, &st));
+    return st.st_size;
 }
 /* how many files the art folder holds */
 static int art_count(void) {
@@ -408,11 +411,12 @@ static void check_levels(void) {
     CHECK(covers() == 0);
     row_is(0, "list", "dir", "Movies", "1 video", "Movies", "");
     row_is(1, "list", "dir", "Series", "3 videos", "Series", "");
-    row_is(2, "screen", "play", "100% Real\xe2\x80\xa6 (2019)", "5 MB",
+    /* a video has no subtitle until the worker has read its length */
+    row_is(2, "screen", "play", "100% Real\xe2\x80\xa6 (2019)", "",
            "100% Real\xe2\x80\xa6 (2019).mp4", "mark");
-    row_is(3, "screen", "play", "Episode 1", "12 KB", "Episode 1.MP4", "mark");
-    row_is(4, "screen", "play", "episode 2", "1.2 GB", "episode 2.mkv", "mark");
-    row_is(5, "screen", "play", "Episode 10", "350 MB", "Episode 10.mkv", "mark");
+    row_is(3, "screen", "play", "Episode 1", "", "Episode 1.MP4", "mark");
+    row_is(4, "screen", "play", "episode 2", "", "episode 2.mkv", "mark");
+    row_is(5, "screen", "play", "Episode 10", "", "Episode 10.mkv", "mark");
     row_is(6, "list", "settings", "Settings", "", "", "");
     CHECK(
         strstr(rp.raw, "\t100%25 Real")); /* its % went out escaped, in the title and the context */
@@ -421,11 +425,13 @@ static void check_levels(void) {
     row_is(1, "list", "dir", "Season 2", "1 video", "Series/Season 2", "");
     CHECK(ask("dir\tSeries/Season 1") ==
           2); /* no Continue Watching and no Settings below the top */
-    row_is(0, "screen", "play", "a", "1 MB", "Series/Season 1/a.mkv", "mark");
-    row_is(1, "screen", "play", "b", "1 MB", "Series/Season 1/b.avi", "mark");
+    row_is(0, "screen", "play", "a", "", "Series/Season 1/a.mkv", "mark");
+    row_is(1, "screen", "play", "b", "", "Series/Season 1/b.avi", "mark");
     CHECK(ask("dir\tMovies") == 1),
-        row_is(0, "screen", "play", "Фильм", "5.0 GB", "Movies/Фильм.mkv", "mark");
-    CHECK(ask("dir\t100%%25 Real") == 0 || 1); /* an escaped argument is read back */
+        row_is(0, "screen", "play", "Фильм", "", "Movies/Фильм.mkv", "mark");
+    /* an escaped argument is read back: the video with a % in its name is found */
+    CHECK(!act("mark\t100%%25 Real\xe2\x80\xa6 (2019).mp4")), SAME(MSG, "Marked as watched");
+    unlink(CARD "/.videos/marks");
     CHECK(!act("dir\tSeries/Season 3")), SAME(STATUS, "unavailable");
 
     /* Sort: Newest First is the videos by when they changed; the folders stay as they were */
@@ -446,7 +452,7 @@ static void check_levels(void) {
     index_put(
         &(thumb_t){ key_of(CARD "/Videos", "Movies/Фильм.mkv"), 1440000, 640, 360, T_PICTURE });
     CHECK(ask("menu") == 7);
-    SAME(ROW(3, SUB), "12 KB"), SAME(ROW(4, SUB), "45 sec"), SAME(ROW(5, SUB), "1 h 42 min");
+    SAME(ROW(3, SUB), ""), SAME(ROW(4, SUB), "45 s"), SAME(ROW(5, SUB), "1 h 42 min");
     /* in progress: what is left, of the length the player marked or else the worker read */
     mark_t *k = marks_put(&m, "Episode 10.mkv", 350 * MB);
     k->pos_ms = 600000, k->dur_ms = 1980000;
@@ -457,24 +463,26 @@ static void check_levels(void) {
     marks_put(&m, "gone.mp4", 1)->pos_ms = 100;                /* a video no longer there */
     CHECK(marks_save(&m));
     CHECK(ask("menu") == 8);
-    /* Continue Watching: the unfinished video played last, first of all */
-    row_is(0, "screen", "play", "Continue Watching", "episode 2 \xc2\xb7 Less than a minute left",
+    /* Continue Watching: the unfinished video played last, first of all; what is left of it,
+     * then its name */
+    row_is(0, "screen", "play", "Continue Watching", "Less than a minute left \xc2\xb7 episode 2",
            "episode 2.mkv", "mark");
-    SAME(ROW(3, SUB), "5 MB"), SAME(ROW(4, SUB), "Watched");
+    SAME(ROW(3, SUB), ""), SAME(ROW(4, SUB), "Watched");
     SAME(ROW(5, SUB), "Less than a minute left"), SAME(ROW(6, SUB), "23 min left");
     row_is(7, "list", "settings", "Settings", "", "", "");
     CHECK(ask("dir\tSeries") == 2); /* at the top alone */
     /* one in a folder, played later; the length is the worker's when the mark has none */
     marks_put(&m, "Movies/Фильм.mkv", 5120 * MB)->pos_ms = 60000;
     CHECK(marks_save(&m) && ask("menu") == 8);
-    row_is(0, "screen", "play", "Continue Watching", "Фильм \xc2\xb7 23 min left",
+    row_is(0, "screen", "play", "Continue Watching", "23 min left \xc2\xb7 Фильм",
            "Movies/Фильм.mkv", "mark");
     CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "23 min left");
     /* a mark of another size is another video's: the row is as unmarked, and nothing to continue */
     file(V "Movies/Фильм.mkv", 5121 * MB, 4000);
-    CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "5.0 GB");
-    CHECK(ask("menu") == 8), SAME(ROW(0, SUB), "episode 2 \xc2\xb7 Less than a minute left");
-    /* what is shown is cut at 255 bytes (q2_escape, above, never inside a character) */
+    CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "");
+    CHECK(ask("menu") == 8), SAME(ROW(0, SUB), "Less than a minute left \xc2\xb7 episode 2");
+    /* what is shown is cut at 255 bytes, never inside a character (q2_escape, above): here the
+     * 255th would be a letter's first half */
     char name[300] = V, rel[300];
     for (int i = 0; i < 124; ++i) strcat(name, "и");
     strcat(name, ".mp4"), snprintf(rel, sizeof rel, "%s", name + strlen(V));
@@ -482,9 +490,10 @@ static void check_levels(void) {
     k = marks_put(&m, rel, MB);
     k->pos_ms = 1000, k->dur_ms = 3600000;
     CHECK(marks_save(&m) && ask("menu") == 9);
-    CHECK(strlen(ROW(0, SUB)) == TEXT_MAX && strlen(ROW(0, TITLE)) == 17 &&
+    CHECK(strlen(ROW(0, SUB)) == TEXT_MAX - 1 && strlen(ROW(0, TITLE)) == 17 &&
           !strcmp(ROW(0, CTX), rel));
-    CHECK(!memcmp(ROW(0, SUB) + 248, " \xc2\xb7 1 h", 6) && strlen(ROW(8 - 1, TITLE)) == 248);
+    CHECK(!memcmp(ROW(0, SUB), "1 h left \xc2\xb7 \xd0\xb8", 14) &&
+          strlen(ROW(8 - 1, TITLE)) == 248);
     unlink(name);
     marks_free(&m);
     unlink(CARD "/.videos/marks");
@@ -580,7 +589,7 @@ static void check_actions(void) {
     unlink(CARD "/.videos/settings");
     CHECK(ask("settings") == 6), SAME(STATUS, "ok"), SAME(CURSOR, "");
     CHECK(covers() == 0);
-    row_is(0, "action", "set", "Play Next", "Off", "next", "");
+    row_is(0, "action", "set", "Autoplay", "Off", "next", "");
     row_is(1, "action", "set", "Subtitles", "On", "subs", "");
     row_is(2, "action", "set", "Subtitle Size", "Medium", "subsize", "");
     row_is(3, "action", "set", "Fit to Screen", "Off", "fill", "");
@@ -605,7 +614,7 @@ static void check_actions(void) {
     CHECK(!s.next && s.subs == 1 && s.subsize == 1 && !s.fill && s.sort == SORT_NAME);
     CHECK(!act("set\tvolume")), SAME(STATUS, "bad"), SAME(MSG, "No such setting");
 
-    /* held Play/Pause on a video: watched, with its toast; again: not, and its place forgotten */
+    /* held Play/Pause on a video: watched, with its toast; again: not */
     unlink(CARD "/.videos/marks");
     CHECK(!act("mark\tEpisode 1.MP4")), SAME(STATUS, "ok"), SAME(MSG, "Marked as watched"),
         SAME(CURSOR, "");
@@ -614,7 +623,7 @@ static void check_actions(void) {
     free(got);
     CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "Watched");
     CHECK(!act("mark\tEpisode 1.MP4")), SAME(STATUS, "ok"), SAME(MSG, "Marked as unwatched");
-    CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "12 KB");
+    CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "");
     /* one in progress: watched where its mark is (its tracks kept, and its turn among the
      * marks), so what is continued next is what was played before it */
     marks_load(&m);
@@ -634,9 +643,14 @@ static void check_actions(void) {
           marks_find(&m, "Episode 1.MP4", 12288)->seq == 1);
     CHECK(!act("mark\tEpisode 10.mkv")), SAME(MSG, "Marked as unwatched");
     marks_load(&m);
-    CHECK((k = marks_find(&m, "Episode 10.mkv", 350ll << 20)) && !k->flags && !k->pos_ms &&
+    CHECK((k = marks_find(&m, "Episode 10.mkv", 350ll << 20)) && !k->flags && k->pos_ms == 600000 &&
           k->seq == 2 && k->audio == 2);
-    /* nothing to continue: its place is gone, and its row says the length the player read */
+    /* its place is kept: it is the one to continue again, with what was left of it */
+    CHECK(ask("menu") == 8), SAME(ROW(0, CTX), "Episode 10.mkv"), SAME(ROW(6, SUB), "23 min left");
+    /* one watched from no place: its length again, as the player read it */
+    k->pos_ms = 0, k->flags = MARK_WATCHED;
+    CHECK(marks_save(&m) && ask("menu") == 7), SAME(ROW(5, SUB), "Watched");
+    CHECK(!act("mark\tEpisode 10.mkv")), SAME(MSG, "Marked as unwatched");
     CHECK(ask("menu") == 7), SAME(ROW(5, SUB), "33 min");
     marks_free(&m);
     /* what is no video of the library's */
@@ -869,7 +883,7 @@ static void check_covers(void) {
     CHECK(k.luma > 60 && k.luma < 130); /* a light glyph on a dark tile */
     CHECK(access(art_path("play", "h264-aac.mp4"), 0) &&
           access(art_path("play", "Episode 1.MP4"), 0));
-    SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "3 MB");
+    SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "");
     CHECK(ask("menu") == 9 &&
           !strcmp(rp.raw + 12, raw + 12)); /* asked again: the same bytes, past the id */
 
@@ -885,10 +899,9 @@ static void check_covers(void) {
     CHECK((t = index_find(key_of(CARD "/Videos", "Episode 1.MP4"))) && t->state == T_NONE &&
           !t->dur_ms && !t->w);
     /* the next reply has them: the videos' covers, the "no picture" tile for a file that has
-     * none, the lengths; and its bytes say how many, so Q2 Pod draws the list again */
+     * none, and the lengths */
     CHECK(ask("menu") == 9 && covers() == 9 && art_count() == 9);
-    CHECK(strcmp(rp.raw + 12, raw + 12));
-    SAME(ROW(6, SUB), "30 sec"), SAME(ROW(7, SUB), "5 sec"), SAME(ROW(3, SUB), "12 KB");
+    SAME(ROW(6, SUB), "30 s"), SAME(ROW(7, SUB), "5 s"), SAME(ROW(3, SUB), "");
     CHECK(same_file(art_path("play", "h264-aac.mp4"),
                     thumb_file(key_of(CARD "/Videos", "h264-aac.mp4"), path)));
     cover_ok(art_path("play", "h264-aac.mp4"), &k);
@@ -901,10 +914,9 @@ static void check_covers(void) {
     CHECK(ask("menu") == 9 && !strcmp(rp.raw + 12, raw + 12) && art_count() == 9);
 
     /* Continue Watching has its video's cover: the same key, counted for both rows */
-    marks_put(&m, "rotated.mp4", (long long)key_of(CARD "/Videos", "rotated.mp4") * 0 + 478819)
-        ->pos_ms = 1000;
+    marks_put(&m, "rotated.mp4", size_of(V "rotated.mp4"))->pos_ms = 1000;
     CHECK(marks_save(&m) && ask("menu") == 10 && covers() == 10 && art_count() == 9);
-    SAME(ROW(0, CTX), "rotated.mp4"), SAME(ROW(0, SUB), "rotated \xc2\xb7 Less than a minute left");
+    SAME(ROW(0, CTX), "rotated.mp4"), SAME(ROW(0, SUB), "Less than a minute left \xc2\xb7 rotated");
     marks_free(&m);
     unlink(CARD "/.videos/marks");
 
@@ -941,7 +953,7 @@ static void check_covers(void) {
     CHECK(key_of(CARD "/Videos", "h264-aac.mp4") != was);
     CHECK(ask("menu") == 9 && covers() == 8 && art_count() == 8 &&
           access(art_path("play", "h264-aac.mp4"), 0));
-    SAME(ROW(6, SUB), "3 MB");
+    SAME(ROW(6, SUB), "");
     CHECK(worker_pass(level, -1, -1) == 0 && access(thumb_file(was, path), 0));
     CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
     CHECK(ask("menu") == 9 && covers() == 9 && !access(art_path("play", "h264-aac.mp4"), 0));
@@ -1094,12 +1106,12 @@ static void await_covers(int ms, int rows, int pictures) {
         n = covers() - 1;
         changes += n != had, had = n;
     }
-    CHECK(changes > 1); /* they came while the list was shown, the reply's bytes saying so */
+    CHECK(changes > 1); /* they came while the list was shown */
     for (int i = 0; i < rows; ++i) {
         if (strcmp(ROW(i, KIND), "screen")) continue;
         cover_ok(art_path("play", ROW(i, CTX)), &k);
         if (same_file(art_path("play", ROW(i, CTX)), "assets/tile-nopicture.jpg")) continue;
-        CHECK(k.luma > 60 && strstr(ROW(i, SUB), " sec"));
+        CHECK(k.luma > 60 && strstr(ROW(i, SUB), " s")); /* its length too */
         --pictures;
     }
     CHECK(!pictures);
