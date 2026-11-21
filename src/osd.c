@@ -169,9 +169,9 @@ int subs_layout(const char *text, int subsize, char lines[][LINE_N], int *px) {
     return n;
 }
 
-/* The lines as they are drawn, made once for each text: white letters in a black outline two
- * pixels wide, so they read over any picture, a white one too. cover is how much of the page
- * each pixel hides, white its own grey. */
+/* The lines as they are drawn, made once for each text: white letters in a black outline, a
+ * pixel of it whole and a second at half, so they read over any picture, a white one too. cover is
+ * how much of the page each pixel hides, white its own grey. */
 static struct {
     char text[3 * LINE_N];
     int size, top, x0, x1; /* the rows from top and the columns from x0 to x1 have something */
@@ -198,10 +198,14 @@ static void subs_render(const char *text, int subsize) {
             for (int dy = -SUB_RING; dy <= SUB_RING; ++dy) /* the most of any letter within 2 px */
                 for (int dx = -SUB_RING; dx <= SUB_RING; ++dx) {
                     int qx = x + dx, qy = y + dy;
-                    if (abs(dx) + abs(dy) < 2 * SUB_RING && qx >= 0 && qx < VIEW_W && qy >= 0 &&
-                        qy < SUB_H && sub.white[qy * VIEW_W + qx] > ring)
-                        ring = sub.white[qy * VIEW_W + qx];
+                    if (abs(dx) + abs(dy) >= 2 * SUB_RING || qx < 0 || qx >= VIEW_W || qy < 0 ||
+                        qy >= SUB_H)
+                        continue;
+                    /* the second pixel out is a half: an edge on a white picture, not a blot */
+                    unsigned v = sub.white[qy * VIEW_W + qx] * (abs(dx) > 1 || abs(dy) > 1 ? 1 : 2);
+                    if (v > ring) ring = v;
                 }
+            ring /= 2;
             sub.cover[y * VIEW_W + x] = (unsigned char)(ring + in - ring * in / 255);
         }
 }
