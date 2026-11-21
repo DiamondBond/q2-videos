@@ -742,7 +742,8 @@ static void check_thumbs(void) {
                  { "vp9-opus.webm", 5, 640, 360 },  { "no-audio.mp4", 5, 640, 360 },
                  { "audio-only.mp4", 5, 0, 0 },     { "rotated.mp4", 5, 640, 360 },
                  { "anamorphic.mp4", 5, 720, 576 }, { "big-1080p.mp4", 5, 1920, 1080 },
-                 { "60fps.mp4", 5, 640, 360 },      { "ass.mkv", 10, 640, 360 } };
+                 { "60fps.mp4", 5, 640, 360 },      { "ass.mkv", 10, 640, 360 },
+                 { "offset.ts", 5, 640, 360 } }; /* one keyframe: nothing to seek to at 15% */
     char path[PATH_N], cmd[2 * PATH_N];
     thumb_t t;
     look_t k;
@@ -1170,12 +1171,13 @@ static void await_covers(int ms, int rows, int pictures) {
 /* The card of the run: these clips at the top, with killer.mp4, a copy of one, and huge.avi,
  * made here; and two in a folder. Four have no picture to make a thumbnail of: one has none,
  * one has a song's cover alone, one is in a codec the Q2 has no decoder for, and huge.avi's is
- * 8192 x 4320, a frame the worker's cap on one allocation of FFmpeg's refuses. */
+ * 8192 x 4320, a frame the worker's cap on one allocation of FFmpeg's refuses. offset.ts is a
+ * transport stream with one keyframe. */
 static const char *const TOP[] = { "60fps.mp4",    "anamorphic.mp4", "audio-only.mp4",
                                    "av1.mkv",      "big-1080p.mp4",  "cover.mp4",
                                    "h264-aac.mp4", "hevc.mp4",       "mpeg4.avi",
-                                   "no-audio.mp4", "rotated.mp4",    "sidecar.mp4",
-                                   "vp9-opus.webm" };
+                                   "no-audio.mp4", "offset.ts",      "rotated.mp4",
+                                   "sidecar.mp4",  "vp9-opus.webm" };
 enum {
     CLIPS = sizeof TOP / sizeof *TOP,
     TOPS = CLIPS + 2, /* the videos at the top */
@@ -1235,6 +1237,7 @@ static void check_server(char **cmd, int host) {
     index_load();
     CHECK(index_find(key_of(ECARD "/Videos", "killer.mp4"))->state == (host ? T_NONE : T_PICTURE));
     CHECK(index_find(key_of(ECARD "/Videos", "huge.avi"))->state == T_NONE);
+    CHECK(index_find(key_of(ECARD "/Videos", "offset.ts"))->state == T_PICTURE);
     index_free();
 
     /* a thumbnail deleted from the cache is made again, once its row's cover is looked for anew

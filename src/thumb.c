@@ -299,6 +299,14 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
             if (from < -DUR_MAX * 1000 || from > DUR_MAX * 1000) from = 0; /* unknown, or no time */
             made = avcodec_open2(c, codec, 0) >= 0 &&
                    shot(f, c, stream, len ? from + len * 15 / 100 : -1, pkt, frame, out, &end);
+            /* A stream with one keyframe (a short recording in a transport or program stream)
+             * has none to seek to before that place, and the seek left the file past it: from
+             * the file's first byte then. */
+            if (!made && len && avcodec_is_open(c) &&
+                av_seek_frame(f, -1, 0, AVSEEK_FLAG_BYTE) >= 0) {
+                avcodec_flush_buffers(c);
+                made = shot(f, c, stream, -1, pkt, frame, out, &end);
+            }
             if (made && len && dark(out) && (again = av_frame_alloc()) &&
                 shot(f, c, stream, from + len * 30 / 100, pkt, frame, again, &end)) {
                 AVFrame *first = out;
