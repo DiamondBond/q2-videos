@@ -129,6 +129,10 @@ typedef struct {
 /* A video by its name's extension, case aside: mp4 m4v mkv webm avi mov mpg mpeg wmv flv ts m2ts
  * 3gp ogv. */
 int is_video(const char *name);
+/* The containers those extensions name, as libavformat calls their readers. The thumbnails and
+ * the player open a file as one of these or not at all (format_whitelist): a playlist or a script
+ * named .mp4 would have libavformat open whatever it lists. */
+#define FORMATS "mov,matroska,avi,mpegts,mpeg,flv,asf,ogg,mpegvideo,m4v"
 /* Natural order, case aside: digits count as numbers, so "Episode 2" is before "Episode 10". */
 int natcmp(const char *a, const char *b);
 /* 1 when rel is a path this app could have made: at most REL_MAX bytes, every part of it a name

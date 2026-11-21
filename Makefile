@@ -35,15 +35,12 @@ Q2_ONLY_SRC = src/crt-q2.c src/platform_q2.c src/sound_q2.c
 # The host build alone (what stands in for the Q2 there):
 HOST_ONLY_SRC =
 
-# Weak stand-ins for serve_main and player_main until both are written; then delete it and this.
-STUB_SRC = src/stubs.c
-
 # The rows' static covers, JPEGs: copied beside the binary and packed into the zip.
 TILES = assets/tile-folder.jpg assets/tile-settings.jpg assets/tile-nopicture.jpg
 
 SRC = $(COMMON_SRC) $(PLAYER_SRC) $(SERVE_SRC)
-Q2_OBJ = $(patsubst src/%.c,build/q2/%.o,$(SRC) $(Q2_ONLY_SRC) $(STUB_SRC))
-HOST_OBJ = $(patsubst src/%.c,build/host/%.o,$(SRC) $(HOST_ONLY_SRC) $(STUB_SRC))
+Q2_OBJ = $(patsubst src/%.c,build/q2/%.o,$(SRC) $(Q2_ONLY_SRC))
+HOST_OBJ = $(patsubst src/%.c,build/host/%.o,$(SRC) $(HOST_ONLY_SRC))
 HDR = $(wildcard src/*.h) VERSION
 DIST = dist/.videos
 # The Q2's own FFmpeg, linked as it has it, and what that needs in turn.

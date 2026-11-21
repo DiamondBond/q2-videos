@@ -366,9 +366,6 @@ static int rotation(AVStream *st) {
     return turn == turn ? (int)turn : 0; /* a matrix that is no rotation says NaN */
 }
 
-/* The containers a video's extension names (is_video), as libavformat calls their readers. */
-#define FORMATS "mov,matroska,avi,mpegts,mpeg,flv,asf,ogg,mpegvideo,m4v"
-
 /* The file at path opened, as the page's thumbnails open it (thumb.c): as one of FORMATS or not
  * at all, and nothing but files for whatever it names in turn, so a playlist or a script named
  * .mp4 is never followed; "file:" so that no name reads as a protocol's. An open or a read that

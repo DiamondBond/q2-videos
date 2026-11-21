@@ -19,10 +19,6 @@
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
 
-/* The containers a video's extension names (is_video), as libavformat calls their readers. A
- * file is opened as one of these or not at all: a playlist or a script named .mp4 would have
- * libavformat open whatever it lists. */
-#define FORMATS "mov,matroska,avi,mpegts,mpeg,flv,asf,ogg,mpegvideo,m4v"
 #define SIDE_MAX 16384              /* a picture's width or height at most: more is no video */
 #define DUR_MAX (10000ll * 3600000) /* a length past 10,000 hours is no length */
 #define PACKETS 1000                /* read for one picture at most, should none come */
