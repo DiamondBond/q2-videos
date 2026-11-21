@@ -22,11 +22,10 @@
 #define IDLE_MS 600000 /* no request and no video playing this long: the server ends itself */
 #define REQ_MS 2000    /* a request is read, and its reply taken, within this */
 #define HEAD_MAX 128   /* a reply's first two lines at most */
-/* The covers the art folder holds at most, a level's: a tile is 2 kB and a thumbnail about 6, so
- * 6 MB of /tmp at the very most.
- * ponytail: a folder's rows past the 1,000th paged get no cover; a window of them as the list
- * moves, if folders that long are ever browsed. */
-#define COVERS 1000
+/* The covers the art folder holds at most: those of the rows Q2 Pod holds of one level, ten
+ * replies of ROWS_MAX (addon.c ADDON_PAGES), after which its More… row opens the next as a level
+ * of their own. A tile is 2 kB and a thumbnail about 6, so 3 MB of /tmp at the very most. */
+#define COVERS (10 * ROWS_MAX)
 
 static volatile sig_atomic_t quit;
 static void on_term(int sig) {
@@ -143,7 +142,8 @@ static struct {
     unsigned long long thumb; /* C_THUMB: the thumbnail's key in the cache */
 } art[COVERS];
 static int arts;
-static char shown[REL_MAX + 1]; /* the level they are of */
+static char shown[REL_MAX + 1]; /* the level they are of, and the row its COVERS rows start at */
+static int shown_off;
 
 static const char *art_file(const char *name, char *path) {
     snprintf(path, PATH_N, "%s/q2-videos.art/%s", tmp_dir, name);
@@ -377,9 +377,13 @@ static void level(rep_t *r, const char *rel, int off) {
     for (int i = 0; i < n; ++i)
         missing |= (item[i].type == I_VIDEO || item[i].type == I_CONTINUE) && !item[i].t;
 
-    /* another level than the one shown last: the art folder is this one's now. (Q2 Pod has let
-     * the other's rows go before it asks; Settings, which has no covers, leaves it be.) */
-    if (arty && !off && strcmp(rel, shown)) art_clear(), snprintf(shown, sizeof shown, "%s", rel);
+    /* Another level than the one shown last, or its rows from another COVERS on (More…, or Back
+     * from there): the art folder is this one's now. Q2 Pod has let the other's rows go before
+     * it asks; Settings, which has no covers, leaves the folder be. */
+    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off)) {
+        art_clear();
+        snprintf(shown, sizeof shown, "%s", rel), shown_off = off;
+    }
 
     for (int i = off; i < n; ++i, ++sent) {
         const item_t *it = &item[i];

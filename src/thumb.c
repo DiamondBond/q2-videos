@@ -404,6 +404,9 @@ static int one(const char *root, const char *rel, const entry_t *e, char *level,
     index_save();
     tell(out, &t);
     close(lock);
+    /* A player that waited for the lock has it before the next video is begun: flock() keeps no
+     * queue, and this process would otherwise take it again first. */
+    usleep(20000);
     return heard(in, level);
 }
 

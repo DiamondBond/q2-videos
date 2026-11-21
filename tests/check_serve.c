@@ -65,6 +65,8 @@ static long long now_ms(void) {
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
 }
+/* the next of a row of numbers that is the same each run, from an unsigned seed in scope */
+#define RND() (seed = seed * 1664525u + 1013904223u, seed >> 8)
 static void nap(int ms) { usleep((useconds_t)ms * 1000); }
 /* a video's key in the cache, from the file as it is now */
 static unsigned long long key_of(const char *root, const char *rel) {
@@ -651,6 +653,37 @@ static void check_actions(void) {
     unlink(CARD "/.videos/marks");
 }
 
+/* Requests with bytes changed and ends cut off, at random but the same each run: each has a
+ * reply Q2 Pod can read, with one of the five statuses. */
+static void check_bent_requests(void) {
+    static const char *const good[] = { "Q2SPOT/1\n7\tmenu\n",
+                                        "Q2SPOT/1\n8\tmenu\t5\n",
+                                        "Q2SPOT/1\n9\tdir\tSeries\n",
+                                        "Q2SPOT/1\n10\tdir\tSeries/Season 1\t1\n",
+                                        "Q2SPOT/1\n11\tsettings\n",
+                                        "Q2SPOT/1\n12\tset\tsort\n",
+                                        "Q2SPOT/1\n13\tmark\tEpisode 1.MP4\n",
+                                        "Q2SPOT/1\n14\tdir\t100%25 Real\n" };
+    static const char with[] = "\t\n%/.\r0\x80"; /* and the NUL that ends it */
+    unsigned seed = 1;
+    char req[64];
+    for (int round = 0; round < 4000; ++round) {
+        const char *from = good[round % (sizeof good / sizeof *good)];
+        size_t n = strlen(from);
+        memcpy(req, from, n);
+        for (int flips = 1 + (int)(RND() % 3); flips; --flips) {
+            size_t at = RND() % n;
+            req[at] = RND() % 2 ? with[RND() % sizeof with] : (char)RND();
+        }
+        const char *status = status_of(req, round % 7 == 6 ? RND() % (n + 1) : n);
+        CHECK(!strcmp(status, "ok") || !strcmp(status, "bad") || !strcmp(status, "unsupported") ||
+              !strcmp(status, "unavailable") || !strcmp(status, "error"));
+        CHECK(strspn(rp.f[0], "0123456789") == strlen(rp.f[0]) && *rp.f[0]);
+    }
+    unlink(CARD "/.videos/settings"),
+        unlink(CARD "/.videos/marks"); /* what a set or a mark among them left */
+}
+
 /* ---- Thumbnails ---------------------------------------------------------------------------- */
 
 static unsigned char jpg[THUMB_BYTES];
@@ -761,7 +794,6 @@ static void check_thumbs(void) {
      * none, in its time, and the check still standing */
     static const char *const prey[] = { "no-audio.mp4", "vp9-opus.webm", "mpeg4.avi" };
     unsigned seed = 20261122;
-#define RND() (seed = seed * 1664525u + 1013904223u, seed >> 8)
     for (size_t c = 0; c < sizeof prey / sizeof *prey; ++c) {
         snprintf(path, sizeof path, "%s/%s", clips, prey[c]);
         char *whole = file_get(path, &len), *bent = malloc(len);
@@ -885,6 +917,22 @@ static void check_covers(void) {
     CHECK(ask("settings") == 6 && covers() == 0 && art_count() == 3);
     CHECK(ask("menu") == 9 && covers() == 9 && art_count() == 9 &&
           !access(art_path("dir", "Series"), 0));
+
+    /* A level longer than Q2 Pod holds at once: its More… row asks for the rows from the 500th
+     * as a level of their own, and the art folder is then theirs; Back asks for the first again. */
+    sh("for i in $(seq 100 619); do mkdir -p " V "Lots/d$i && : > " V
+       "Lots/d$i/v.mp4 || exit 1; done");
+    for (int off = 0; off < 500; off += 50) {
+        CHECK((off ? ask("dir\tLots\t%d", off) : ask("dir\tLots")) == 50), SAME(MSG, "pages");
+        CHECK(art_count() == off + 50);
+    }
+    SAME(CURSOR, "500");
+    CHECK(ask("dir\tLots\t500") == 20 && art_count() == 20), SAME(CURSOR, "");
+    CHECK(access(art_path("dir", "Lots/d100"), 0) &&
+          same_file(art_path("dir", "Lots/d619"), "assets/tile-folder.jpg"));
+    CHECK(ask("dir\tLots") == 50 && art_count() == 50 && !access(art_path("dir", "Lots/d100"), 0));
+    sh("rm -rf " V "Lots");
+    CHECK(ask("menu") == 9 && covers() == 9 && art_count() == 9);
 
     /* a video that changed is another video: a new key, its cover gone until the worker has
      * made the new one, and the old thumbnail tidied out of the cache */
@@ -1152,8 +1200,15 @@ static void check_server(char **cmd, int host) {
     start(cmd, 0);
     CHECK(ask("menu") == 50), SAME(MSG, "pages");
     nap(host ? 100 : 1500);
+    /* a player starting meanwhile has the lock once the video in the making is done, and keeps
+     * it: nothing is made under it */
+    began = now_ms();
+    CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < THUMB_MS + 1000);
+    int had = index_lines(ECARD, &pictures);
+    nap(1200);
+    CHECK(index_lines(ECARD, &pictures) == had && had < 53); /* it was not through */
+    close(lock);
     stop();
-    CHECK(index_lines(ECARD, &pictures) < 53); /* it was not through */
     if (!host) return;
 
     /* Idleness, the ten minutes as 1.5 s through the host build's hook: the server ends itself
@@ -1204,6 +1259,7 @@ int main(int argc, char **argv) {
     check_paging();
     check_contexts();
     check_actions();
+    check_bent_requests();
     check_thumbs();
     check_covers();
     check_server(host, 1);
