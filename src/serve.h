@@ -34,18 +34,22 @@ size_t serve_reply(const char *req, size_t n, char *out);
 #define THUMB_MS 5000          /* a video's probe and picture may take this long, then are let go */
 
 /* What the worker found out about a video: a line of the cache's index. */
-enum { T_PICTURE = 'p', T_NONE = 'x', T_TRYING = '?' };
+enum { T_PICTURE = 'p', T_NONE = 'x', T_LATER = '~', T_TRYING = '?' };
 typedef struct {
     unsigned long long key; /* cache_key(): its path, size and time of change */
     long long dur_ms;       /* its length, 0 unknown */
     int w, h;               /* its picture's size, 0 unknown */
     char state; /* T_PICTURE: the cache has its thumbnail; T_NONE: it has none to show (the
-                   "no picture" tile); T_TRYING, from the worker alone: it is on this one */
+                   "no picture" tile); T_LATER: none for now, for a cause that is not the
+                   file's and may pass (the same tile, in memory alone); T_TRYING, from the
+                   worker alone: it is on this one */
 } thumb_t;
 
 /* The index, state_dir/cache/index, a line a video: "key16<TAB>dur_ms<TAB>WxH<TAB>state". In
  * memory it is one process's: the server's copy takes what the worker tells it (index_put), the
- * worker's own is the one saved. Garbage and torn lines are skipped. */
+ * worker's own, which starts as the server's (it is forked from it), is the one saved. A
+ * T_LATER line is never saved: it keeps the video from being tried again while this server
+ * runs, and the next one tries it once more. Garbage and torn lines are skipped. */
 void index_load(void);
 const thumb_t *index_find(unsigned long long key);
 void index_put(const thumb_t *t);
@@ -56,7 +60,8 @@ const char *thumb_file(unsigned long long key, char *path);
 /* The video at path probed, and its thumbnail made: a frame from 15% of its length (from 30%
  * when that one is near black), its middle square at THUMB_PX, turned as the video is shown, as
  * a JPEG in jpg (THUMB_BYTES of room), *n bytes. 1 when there is one; *t then says T_PICTURE,
- * else T_NONE, with as much of the length and size as was read. Never more than ms. */
+ * else T_NONE, or T_LATER when what kept it from one was too little memory free or its time
+ * running out, with as much of the length and size as was read. Never more than ms. */
 int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t *n);
 /* One round of the worker's: the cache tidied, then every video without a line in the index
  * probed (thumb_make), level's own first, each saved to the cache and told on out as it is done.

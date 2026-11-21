@@ -28,8 +28,10 @@
 
 /* ---- The index ----------------------------------------------------------------------------- */
 
-/* ponytail: the lines are looked through one by one, a row's and a video's each time; sort them
- * and bsearch if a library of tens of thousands of videos ever makes a list slow. */
+/* ponytail: the lines are looked through one by one. A reply looks for its rows' videos, 50 at
+ * most; the worker's round for every video of the library, and its tidying likewise: videos x
+ * lines, 400 million steps at 20,000 videos, in the background. Keep the lines sorted (index_put,
+ * and tidy's drop) and bsearch if a library that size ever makes a round slow. */
 static struct {
     thumb_t *v;
     int n, room;
@@ -114,8 +116,9 @@ static int index_save(void) {
     FILE *f = open_memstream(&text, &len);
     if (!f) return 0;
     for (int i = 0; i < ix.n; ++i)
-        fprintf(f, "%016llx\t%lld\t%dx%d\t%c\n", ix.v[i].key, ix.v[i].dur_ms, ix.v[i].w, ix.v[i].h,
-                ix.v[i].state);
+        if (ix.v[i].state != T_LATER) /* this run's alone: the next tries the video again */
+            fprintf(f, "%016llx\t%lld\t%dx%d\t%c\n", ix.v[i].key, ix.v[i].dur_ms, ix.v[i].w,
+                    ix.v[i].h, ix.v[i].state);
     int ok = !ferror(f);
     if (fclose(f)) ok = 0;
     ok = ok && file_put(cache_file("index", path), text, len);
@@ -262,8 +265,16 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
         AVCodec *codec = avcodec_find_decoder(par->codec_id);
         if (par->width > 0 && par->height > 0 && par->width <= SIDE_MAX && par->height <= SIDE_MAX)
             t->w = par->width, t->h = par->height;
-        if (t->w && codec && !too_large(t->w, t->h, pix_bits(par->format), mem_available()) &&
-            (c = avcodec_alloc_context3(codec)) && avcodec_parameters_to_context(c, par) >= 0) {
+        unsigned avail = mem_available();
+#ifdef HOST /* the checks' Q2, with this much memory free */
+        if (getenv("VIDEOS_MEM_KB")) avail = (unsigned)atoi(getenv("VIDEOS_MEM_KB"));
+#endif
+        /* its frames would not fit in what is free now (the player's own rule; the Q2 has no
+         * memory to swap to): none for now */
+        if (t->w && codec && too_large(t->w, t->h, pix_bits(par->format), avail))
+            t->state = T_LATER;
+        else if (t->w && codec && (c = avcodec_alloc_context3(codec)) &&
+                 avcodec_parameters_to_context(c, par) >= 0) {
             c->thread_count = 1;
             /* a picture that grows far past the size the file gave, and was let through on, is
              * not decoded. The room is for a decoder's own buffers, which this counts too:
@@ -275,6 +286,14 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
             if (from < -DUR_MAX * 1000 || from > DUR_MAX * 1000) from = 0; /* unknown, or no time */
             made = avcodec_open2(c, codec, 0) >= 0 &&
                    shot(f, c, stream, len ? from + len * 15 / 100 : -1, pkt, frame, out, &end);
+            /* A stream with one keyframe (a short recording in a transport or program stream)
+             * has none to seek to before that place, and the seek left the file past it: from
+             * the file's first byte then. */
+            if (!made && len && avcodec_is_open(c) &&
+                av_seek_frame(f, -1, 0, AVSEEK_FLAG_BYTE) >= 0) {
+                avcodec_flush_buffers(c);
+                made = shot(f, c, stream, -1, pkt, frame, out, &end);
+            }
             if (made && len && dark(out) && (again = av_frame_alloc()) &&
                 shot(f, c, stream, from + len * 30 / 100, pkt, frame, again, &end)) {
                 AVFrame *first = out;
@@ -283,7 +302,14 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
         }
     }
     made = made && jpeg(out, jpg, n);
-    if (made) t->state = T_PICTURE;
+    /* No picture for want of time, as for want of memory, is this moment's doing more often
+     * than the file's (a card busy with Q2 Pod's own reads, a first seek on a cold card), so it
+     * is not written down for good: T_LATER has a file that is always too slow or too large
+     * tried once by each run of the server, its time at most each. */
+    if (made)
+        t->state = T_PICTURE;
+    else if (late(&end))
+        t->state = T_LATER;
     avcodec_free_context(&c);
     av_frame_free(&again);
     av_frame_free(&out);
@@ -374,9 +400,9 @@ static int one(const char *root, const char *rel, const entry_t *e, char *level,
     int lock = quiet(in, level);
     if (lock < 0) return -1;
     tell(out, &t);
-    /* a thumbnail the card won't take can't be shown either */
+    /* a thumbnail the card won't take can't be shown either: not this time */
     if (thumb_make(path, THUMB_MS, &t, jpg, &n) && !file_put(thumb_file(t.key, path), jpg, n))
-        t.state = T_NONE;
+        t.state = T_LATER;
     index_put(&t);
     /* ponytail: the index is written whole for each video, which over a first round of n videos
      * is n * n / 2 lines (70 MB for 2,000 videos); append to it, and write it whole only in
@@ -385,7 +411,9 @@ static int one(const char *root, const char *rel, const entry_t *e, char *level,
     tell(out, &t);
     close(lock);
     /* A player that waited for the lock has it before the next video is begun: flock() keeps no
-     * queue, and this process would otherwise take it again first. */
+     * queue, and this process could otherwise take it again first. No check holds this line: on
+     * the computer the checks run on, a waiter is awake before the worker comes round without
+     * it too. */
     usleep(20000);
     return heard(in, level);
 }

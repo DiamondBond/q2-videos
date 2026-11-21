@@ -10,7 +10,7 @@ A card app for the Shanling Q2. Unzipped at the card's root, `videos.zip` holds 
 
 - **The Q2 sysroot** in `~/.cache/q2/sysroot` (`make SYSROOT=…`).
 - **FFmpeg 4.2**, the release the Q2 has (libavcodec 58.54.100). `tools/ffmpeg.sh` downloads the 4.2.11 source from ffmpeg.org, checks it against the sha256 pinned in the script, and builds it for this computer with only its own codecs and no assembly, as the Q2's is built. It leaves `~/.cache/q2-videos/ffmpeg-4.2/host` (`bin/ffmpeg`, `bin/ffprobe`, `lib/`, `include/`) for the host build and the checks, and `~/.cache/q2-videos/ffmpeg-4.2/include-q2`, the same headers set for the Q2, for the device build. It needs curl, a C compiler and zlib's headers, and does nothing once both are there. `tools/ffmpeg.sh DIR` and `make FFMPEG=DIR` use another place.
-- **A Q2 Pod build's `rootfs.squashfs`** (`make ROOTFS=…`; by default the newest under `~/git/q2/q2-pod/dist`). The Makefile takes the Q2's FFmpeg libraries, and the libraries those need, from it into `build/rootfs/`, and links the app against them.
+- **A Q2 Pod build's `rootfs.squashfs`** (`make ROOTFS=…`; by default the one under `~/git/q2/q2-pod/dist` that sorts last by version: the highest release's, or a dev build's when there is no release). The Makefile takes the Q2's FFmpeg libraries, and the libraries those need, from it into `build/rootfs/`, and links the app against them.
 
 | Command | Does |
 | --- | --- |

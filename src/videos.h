@@ -73,11 +73,11 @@ int rotation(struct AVStream *st);
 
 enum { SORT_NAME, SORT_NEWEST };
 typedef struct {
-    int next;    /* Play Next: 0 Off, 1 On */
+    int next;    /* Autoplay: 0 Off, 1 On */
     int subs;    /* Subtitles: 0 Off, 1 On */
     int subsize; /* Subtitle Size: 0 Small, 1 Medium, 2 Large */
     int fill;    /* Fit to Screen: 0 Off (all of the picture), 1 On (the screen filled) */
-    int sort;    /* Sort: SORT_NAME By Name, SORT_NEWEST Newest First */
+    int sort;    /* Sort: SORT_NAME By Name, SORT_NEWEST Recently Added */
 } settings_t;
 
 /* The file "settings", key=value lines (next, subs, subsize, fill, sort; the values as above).
@@ -133,6 +133,7 @@ typedef struct {
     int count;       /* a folder: the videos in it, through its subfolders */
     long long size;  /* a video: its bytes */
     long long mtime; /* a video: when it was last changed, seconds */
+    long long added; /* a video listed SORT_NEWEST: when it came to the card, nanoseconds */
 } entry_t;
 typedef struct {
     entry_t *v;  /* the folders, then the videos */
@@ -161,9 +162,9 @@ int lib_root(char *root, size_t n);
 /* root and rel joined into out ("" is root itself). 0 when rel is not rel_ok or out is short. */
 int lib_path(const char *root, const char *rel, char *out, size_t n);
 /* The folder at rel ("" the top): its subfolders that hold a video somewhere inside, in natural
- * order, each with its count; then its videos, in natural order or (SORT_NEWEST) the newest
- * first. Dot entries, and paths over REL_MAX, are left out and not counted. 0 when the folder
- * can't be read; lib_free() l either way. */
+ * order, each with its count; then its videos, in natural order or (SORT_NEWEST) the last to
+ * come to the card first. Dot entries, and paths over REL_MAX, are left out and not counted. 0
+ * when the folder can't be read; lib_free() l either way. */
 int lib_list(const char *root, const char *rel, int sort, listing_t *l);
 /* Every video under root, each named by its path from there, in natural order. 0 when root can't
  * be read (never an empty library: the caller mustn't take a pulled card for one). */
@@ -179,7 +180,7 @@ int lib_next(const char *root, const char *rel, int sort, char *out, size_t n);
 const mark_t *lib_continue(const char *root, const marks_t *m);
 
 /* A row's subtitle texts, into out, which is returned. A length: "1 h 42 min", "2 h", "24 min",
- * "45 sec"; "" when it is unknown (0). What is left: "23 min left", "1 h 5 min left", "Less than
+ * "45 s"; "" when it is unknown (0). What is left: "23 min left", "1 h 5 min left", "Less than
  * a minute left". A size: "1.2 GB", "350 MB", "12 KB". */
 const char *text_length(long long ms, char *out, size_t n);
 const char *text_left(long long pos_ms, long long dur_ms, char *out, size_t n);

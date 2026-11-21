@@ -17,6 +17,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -158,20 +159,27 @@ static void row_is(int i, const char *kind, const char *uri, const char *title, 
     SAME(ROW(i, KIND), kind), SAME(ROW(i, URI), uri), SAME(ROW(i, TITLE), title);
     SAME(ROW(i, SUB), sub), SAME(ROW(i, CTX), ctx), SAME(ROW(i, POS), pos);
 }
-/* A live reply's message as it was sent: it must read "refresh", and the letters sent as
- * escapes spell the number of covers its rows have (serve.c live()). That number. */
-static int covers(void) {
-    const char *s = strchr(strchr(rp.raw + 9, '\t') + 1, '\t') + 1; /* past the id and the status */
-    int n = 0;
-    SAME(MSG, "refresh");
-    for (int i = 0; i < 7; ++i, s += *s == '%' ? 3 : 1) n |= (*s == '%') << i;
-    CHECK(*s == '\t');
-    return n;
-}
 static const char *art_path(const char *uri, const char *ctx) {
     static char path[PATH_N];
     snprintf(path, sizeof path, "%s/q2-videos.art/%08x.jpg", tmp_dir, art_key(uri, ctx));
     return path;
+}
+/* The reply's covers, as Q2 Pod counts them each time it has asked (addon.c art_rows): the rows
+ * whose art file is there. */
+static int row_arts(void) {
+    int n = 0;
+    for (int i = 0; i < rp.rows; ++i) n += !access(art_path(ROW(i, URI), ROW(i, CTX)), 0);
+    return n;
+}
+/* A live reply's: its message is the plain word, as sent. */
+static int covers(void) {
+    CHECK(strstr(rp.raw, "\tok\trefresh\t\n"));
+    return row_arts();
+}
+static long long size_of(const char *path) {
+    struct stat st;
+    CHECK(!stat(path, &st));
+    return st.st_size;
 }
 /* how many files the art folder holds */
 static int art_count(void) {
@@ -383,11 +391,12 @@ static void check_levels(void) {
     CHECK(covers() == 0);
     row_is(0, "list", "dir", "Movies", "1 video", "Movies", "");
     row_is(1, "list", "dir", "Series", "3 videos", "Series", "");
-    row_is(2, "screen", "play", "100% Real\xe2\x80\xa6 (2019)", "5 MB",
+    /* a video has no subtitle until the worker has read its length */
+    row_is(2, "screen", "play", "100% Real\xe2\x80\xa6 (2019)", "",
            "100% Real\xe2\x80\xa6 (2019).mp4", "mark");
-    row_is(3, "screen", "play", "Episode 1", "12 KB", "Episode 1.MP4", "mark");
-    row_is(4, "screen", "play", "episode 2", "1.2 GB", "episode 2.mkv", "mark");
-    row_is(5, "screen", "play", "Episode 10", "350 MB", "Episode 10.mkv", "mark");
+    row_is(3, "screen", "play", "Episode 1", "", "Episode 1.MP4", "mark");
+    row_is(4, "screen", "play", "episode 2", "", "episode 2.mkv", "mark");
+    row_is(5, "screen", "play", "Episode 10", "", "Episode 10.mkv", "mark");
     row_is(6, "list", "settings", "Settings", "", "", "");
     CHECK(
         strstr(rp.raw, "\t100%25 Real")); /* its % went out escaped, in the title and the context */
@@ -396,19 +405,35 @@ static void check_levels(void) {
     row_is(1, "list", "dir", "Season 2", "1 video", "Series/Season 2", "");
     CHECK(ask("dir\tSeries/Season 1") ==
           2); /* no Continue Watching and no Settings below the top */
-    row_is(0, "screen", "play", "a", "1 MB", "Series/Season 1/a.mkv", "mark");
-    row_is(1, "screen", "play", "b", "1 MB", "Series/Season 1/b.avi", "mark");
+    row_is(0, "screen", "play", "a", "", "Series/Season 1/a.mkv", "mark");
+    row_is(1, "screen", "play", "b", "", "Series/Season 1/b.avi", "mark");
     CHECK(ask("dir\tMovies") == 1),
-        row_is(0, "screen", "play", "Фильм", "5.0 GB", "Movies/Фильм.mkv", "mark");
-    CHECK(ask("dir\tSeries%%2fSeason 1") == 2); /* an escaped argument is read back */
+        row_is(0, "screen", "play", "Фильм", "", "Movies/Фильм.mkv", "mark");
+    /* an escaped argument is read back: the video with a % in its name is found */
+    CHECK(!act("mark\t100%%25 Real\xe2\x80\xa6 (2019).mp4")), SAME(MSG, "Marked as watched");
+    unlink(CARD "/.videos/marks");
     CHECK(!act("dir\tSeries/Season 3")), SAME(STATUS, "unavailable");
 
-    /* Sort: Newest First is the videos by when they changed; the folders stay as they were */
+    /* Sort: Recently Added is the videos by when each came to the card (its creation time, not
+     * the date it has: a copied file keeps that), the last first; the folders stay as they were.
+     * One is put there anew: the last to come, and not the last changed. */
+    struct statx sx;
+    nap(20); /* past a tick of the file system's clock */
+    unlink(V "Episode 1.MP4"), file(V "Episode 1.MP4", 12 << 10, 2000);
     CHECK(!act("set\tsort")), SAME(STATUS, "ok"), SAME(MSG, "");
     CHECK(ask("menu") == 7);
-    SAME(ROW(0, TITLE), "Movies"), SAME(ROW(1, TITLE), "Series"), SAME(ROW(2, TITLE), "episode 2");
-    SAME(ROW(3, TITLE), "Episode 1"), SAME(ROW(4, TITLE), "Episode 10"),
-        SAME(ROW(5, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+    SAME(ROW(0, TITLE), "Movies"), SAME(ROW(1, TITLE), "Series");
+    if (!syscall(SYS_statx, AT_FDCWD, V "Episode 1.MP4", 0, STATX_BTIME, &sx) &&
+        sx.stx_mask & STATX_BTIME) {
+        SAME(ROW(2, TITLE), "Episode 1"), SAME(ROW(3, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+        SAME(ROW(4, TITLE), "episode 2"), SAME(ROW(5, TITLE), "Episode 10");
+    }
+    /* a card that keeps no creation time: by when each was last changed */
+    setenv("VIDEOS_NO_BTIME", "1", 1);
+    CHECK(ask("menu") == 7);
+    SAME(ROW(2, TITLE), "episode 2"), SAME(ROW(3, TITLE), "Episode 1");
+    SAME(ROW(4, TITLE), "Episode 10"), SAME(ROW(5, CTX), "100% Real\xe2\x80\xa6 (2019).mp4");
+    unsetenv("VIDEOS_NO_BTIME");
     CHECK(!act("set\tsort"));
     CHECK(ask("menu") == 7), SAME(ROW(5, TITLE), "Episode 10");
 
@@ -421,7 +446,7 @@ static void check_levels(void) {
     index_put(
         &(thumb_t){ key_of(CARD "/Videos", "Movies/Фильм.mkv"), 1440000, 640, 360, T_PICTURE });
     CHECK(ask("menu") == 7);
-    SAME(ROW(3, SUB), "12 KB"), SAME(ROW(4, SUB), "45 sec"), SAME(ROW(5, SUB), "1 h 42 min");
+    SAME(ROW(3, SUB), ""), SAME(ROW(4, SUB), "45 s"), SAME(ROW(5, SUB), "1 h 42 min");
     /* in progress: what is left, of the length the player marked or else the worker read */
     mark_t *k = marks_put(&m, "Episode 10.mkv", 350 * MB);
     k->pos_ms = 600000, k->dur_ms = 1980000;
@@ -432,24 +457,26 @@ static void check_levels(void) {
     marks_put(&m, "gone.mp4", 1)->pos_ms = 100;                /* a video no longer there */
     CHECK(marks_save(&m));
     CHECK(ask("menu") == 8);
-    /* Continue Watching: the unfinished video played last, first of all */
-    row_is(0, "screen", "play", "Continue Watching", "episode 2 \xc2\xb7 Less than a minute left",
+    /* Continue Watching: the unfinished video played last, first of all; what is left of it,
+     * then its name */
+    row_is(0, "screen", "play", "Continue Watching", "Less than a minute left \xc2\xb7 episode 2",
            "episode 2.mkv", "mark");
-    SAME(ROW(3, SUB), "5 MB"), SAME(ROW(4, SUB), "Watched");
+    SAME(ROW(3, SUB), ""), SAME(ROW(4, SUB), "Watched");
     SAME(ROW(5, SUB), "Less than a minute left"), SAME(ROW(6, SUB), "23 min left");
     row_is(7, "list", "settings", "Settings", "", "", "");
     CHECK(ask("dir\tSeries") == 2); /* at the top alone */
     /* one in a folder, played later; the length is the worker's when the mark has none */
     marks_put(&m, "Movies/Фильм.mkv", 5120 * MB)->pos_ms = 60000;
     CHECK(marks_save(&m) && ask("menu") == 8);
-    row_is(0, "screen", "play", "Continue Watching", "Фильм \xc2\xb7 23 min left",
+    row_is(0, "screen", "play", "Continue Watching", "23 min left \xc2\xb7 Фильм",
            "Movies/Фильм.mkv", "mark");
     CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "23 min left");
     /* a mark of another size is another video's: the row is as unmarked, and nothing to continue */
     file(V "Movies/Фильм.mkv", 5121 * MB, 4000);
-    CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "5.0 GB");
-    CHECK(ask("menu") == 8), SAME(ROW(0, SUB), "episode 2 \xc2\xb7 Less than a minute left");
-    /* what is shown is cut at 255 bytes (q2_escape, above, never inside a character) */
+    CHECK(ask("dir\tMovies") == 1), SAME(ROW(0, SUB), "");
+    CHECK(ask("menu") == 8), SAME(ROW(0, SUB), "Less than a minute left \xc2\xb7 episode 2");
+    /* what is shown is cut at 255 bytes, never inside a character (q2_escape, above): here the
+     * 255th would be a letter's first half */
     char name[300] = V, rel[300];
     for (int i = 0; i < 124; ++i) strcat(name, "и");
     strcat(name, ".mp4"), snprintf(rel, sizeof rel, "%s", name + strlen(V));
@@ -457,9 +484,10 @@ static void check_levels(void) {
     k = marks_put(&m, rel, MB);
     k->pos_ms = 1000, k->dur_ms = 3600000;
     CHECK(marks_save(&m) && ask("menu") == 9);
-    CHECK(strlen(ROW(0, SUB)) == TEXT_MAX && strlen(ROW(0, TITLE)) == 17 &&
+    CHECK(strlen(ROW(0, SUB)) == TEXT_MAX - 1 && strlen(ROW(0, TITLE)) == 17 &&
           !strcmp(ROW(0, CTX), rel));
-    CHECK(!memcmp(ROW(0, SUB) + 248, " \xc2\xb7 1 h", 6) && strlen(ROW(8 - 1, TITLE)) == 248);
+    CHECK(!memcmp(ROW(0, SUB), "1 h left \xc2\xb7 \xd0\xb8", 14) &&
+          strlen(ROW(8 - 1, TITLE)) == 248);
     unlink(name);
     marks_free(&m);
     unlink(CARD "/.videos/marks");
@@ -555,7 +583,7 @@ static void check_actions(void) {
     unlink(CARD "/.videos/settings");
     CHECK(ask("settings") == 6), SAME(STATUS, "ok"), SAME(CURSOR, "");
     CHECK(covers() == 0);
-    row_is(0, "action", "set", "Play Next", "Off", "next", "");
+    row_is(0, "action", "set", "Autoplay", "Off", "next", "");
     row_is(1, "action", "set", "Subtitles", "On", "subs", "");
     row_is(2, "action", "set", "Subtitle Size", "Medium", "subsize", "");
     row_is(3, "action", "set", "Fit to Screen", "Off", "fill", "");
@@ -563,7 +591,7 @@ static void check_actions(void) {
     row_is(5, "info", "", "Version", VERSION, "", "");
     /* a press: "ok", no message (the row changes in place) and no rows; kept on the card */
     static const char *const key[] = { "next", "subs", "subsize", "fill", "sort" };
-    static const char *const then[] = { "On", "Off", "Large", "On", "Newest First" };
+    static const char *const then[] = { "On", "Off", "Large", "On", "Recently Added" };
     for (int i = 0; i < 5; ++i) {
         CHECK(!act("set\t%s", key[i])), SAME(STATUS, "ok"), SAME(MSG, ""), SAME(CURSOR, "");
         CHECK(ask("settings") == 6), SAME(ROW(i, SUB), then[i]);
@@ -580,7 +608,7 @@ static void check_actions(void) {
     CHECK(!s.next && s.subs == 1 && s.subsize == 1 && !s.fill && s.sort == SORT_NAME);
     CHECK(!act("set\tvolume")), SAME(STATUS, "bad"), SAME(MSG, "No such setting");
 
-    /* held Play/Pause on a video: watched, with its toast; again: not, and its place forgotten */
+    /* held Play/Pause on a video: watched, with its toast; again: not */
     unlink(CARD "/.videos/marks");
     CHECK(!act("mark\tEpisode 1.MP4")), SAME(STATUS, "ok"), SAME(MSG, "Marked as watched"),
         SAME(CURSOR, "");
@@ -589,7 +617,7 @@ static void check_actions(void) {
     free(got);
     CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "Watched");
     CHECK(!act("mark\tEpisode 1.MP4")), SAME(STATUS, "ok"), SAME(MSG, "Marked as unwatched");
-    CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "12 KB");
+    CHECK(ask("menu") == 7), SAME(ROW(3, SUB), "");
     /* one in progress: watched where its mark is (its tracks kept, and its turn among the
      * marks), so what is continued next is what was played before it */
     marks_load(&m);
@@ -609,9 +637,14 @@ static void check_actions(void) {
           marks_find(&m, "Episode 1.MP4", 12288)->seq == 1);
     CHECK(!act("mark\tEpisode 10.mkv")), SAME(MSG, "Marked as unwatched");
     marks_load(&m);
-    CHECK((k = marks_find(&m, "Episode 10.mkv", 350ll << 20)) && !k->flags && !k->pos_ms &&
+    CHECK((k = marks_find(&m, "Episode 10.mkv", 350ll << 20)) && !k->flags && k->pos_ms == 600000 &&
           k->seq == 2 && k->audio == 2);
-    /* nothing to continue: its place is gone, and its row says the length the player read */
+    /* its place is kept: it is the one to continue again, with what was left of it */
+    CHECK(ask("menu") == 8), SAME(ROW(0, CTX), "Episode 10.mkv"), SAME(ROW(6, SUB), "23 min left");
+    /* one watched from no place: its length again, as the player read it */
+    k->pos_ms = 0, k->flags = MARK_WATCHED;
+    CHECK(marks_save(&m) && ask("menu") == 7), SAME(ROW(5, SUB), "Watched");
+    CHECK(!act("mark\tEpisode 10.mkv")), SAME(MSG, "Marked as unwatched");
     CHECK(ask("menu") == 7), SAME(ROW(5, SUB), "33 min");
     marks_free(&m);
     /* what is no video of the library's */
@@ -669,8 +702,10 @@ static int thumb(const char *path, thumb_t *t, look_t *k) {
     memset(t, 0, sizeof *t), memset(k, 0, sizeof *k);
     long long began = now_ms();
     int made = thumb_make(path, THUMB_MS, t, jpg, &n);
-    CHECK(now_ms() - began < THUMB_MS + 1500); /* never much past its time */
-    CHECK(t->state == (made ? T_PICTURE : T_NONE));
+    long long took = now_ms() - began;
+    CHECK(took < THUMB_MS + 1500); /* never much past its time */
+    /* none for good, unless its time ran out */
+    CHECK(t->state == (made ? T_PICTURE : took > THUMB_MS ? T_LATER : T_NONE));
     if (made)
         CHECK(n > 100 && n <= THUMB_BYTES && file_put(TMP "/t.jpg", jpg, n)),
             cover_ok(TMP "/t.jpg", k);
@@ -686,7 +721,8 @@ static void check_thumbs(void) {
                  { "vp9-opus.webm", 5, 640, 360 },  { "no-audio.mp4", 5, 640, 360 },
                  { "audio-only.mp4", 5, 0, 0 },     { "rotated.mp4", 5, 640, 360 },
                  { "anamorphic.mp4", 5, 720, 576 }, { "big-1080p.mp4", 5, 1920, 1080 },
-                 { "60fps.mp4", 5, 640, 360 },      { "ass.mkv", 10, 640, 360 } };
+                 { "60fps.mp4", 5, 640, 360 },      { "ass.mkv", 10, 640, 360 },
+                 { "offset.ts", 5, 640, 360 } }; /* one keyframe: nothing to seek to at 15% */
     char path[PATH_N], cmd[2 * PATH_N];
     thumb_t t;
     look_t k;
@@ -714,10 +750,10 @@ static void check_thumbs(void) {
        ffmpeg);
     CHECK(thumb(TMP "/dark.mkv", &t, &k) && k.luma < 20);
 
-    /* out of time: let go, and no picture */
+    /* out of time: let go, and no picture for now (a slow card is not the file's doing) */
     snprintf(path, sizeof path, "%s/big-1080p.mp4", clips);
     size_t n = 0;
-    CHECK(!thumb_make(path, 0, &t, jpg, &n) && t.state == T_NONE);
+    CHECK(!thumb_make(path, 0, &t, jpg, &n) && t.state == T_LATER);
 
     /* files that are no videos, whatever their name: no picture, and no harm */
     static const char *const junk[] = { "empty.mp4", "one.mkv", "text.avi", "zeros.mp4",
@@ -841,10 +877,10 @@ static void check_covers(void) {
           same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
     CHECK(same_file(art_path("settings", ""), "assets/tile-settings.jpg"));
     cover_ok(art_path("dir", "Series"), &k), cover_ok(art_path("settings", ""), &k);
-    CHECK(k.luma > 60 && k.luma < 130); /* a light glyph on a dark tile */
+    CHECK(k.luma > 130 && k.luma < 175); /* a white glyph on a mid-grey tile */
     CHECK(access(art_path("play", "h264-aac.mp4"), 0) &&
           access(art_path("play", "Episode 1.MP4"), 0));
-    SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "3 MB");
+    SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "");
     CHECK(ask("menu") == 9 &&
           !strcmp(rp.raw + 12, raw + 12)); /* asked again: the same bytes, past the id */
 
@@ -860,10 +896,9 @@ static void check_covers(void) {
     CHECK((t = index_find(key_of(CARD "/Videos", "Episode 1.MP4"))) && t->state == T_NONE &&
           !t->dur_ms && !t->w);
     /* the next reply has them: the videos' covers, the "no picture" tile for a file that has
-     * none, the lengths; and its bytes say how many, so Q2 Pod draws the list again */
+     * none, and the lengths */
     CHECK(ask("menu") == 9 && covers() == 9 && art_count() == 9);
-    CHECK(strcmp(rp.raw + 12, raw + 12));
-    SAME(ROW(6, SUB), "30 sec"), SAME(ROW(7, SUB), "5 sec"), SAME(ROW(3, SUB), "12 KB");
+    SAME(ROW(6, SUB), "30 s"), SAME(ROW(7, SUB), "5 s"), SAME(ROW(3, SUB), "");
     CHECK(same_file(art_path("play", "h264-aac.mp4"),
                     thumb_file(key_of(CARD "/Videos", "h264-aac.mp4"), path)));
     cover_ok(art_path("play", "h264-aac.mp4"), &k);
@@ -876,11 +911,9 @@ static void check_covers(void) {
     CHECK(ask("menu") == 9 && !strcmp(rp.raw + 12, raw + 12) && art_count() == 9);
 
     /* Continue Watching has its video's cover: the same key, counted for both rows */
-    struct stat st; /* the mark is the file's by its size */
-    CHECK(!stat(V "rotated.mp4", &st));
-    marks_put(&m, "rotated.mp4", st.st_size)->pos_ms = 1000;
+    marks_put(&m, "rotated.mp4", size_of(V "rotated.mp4"))->pos_ms = 1000;
     CHECK(marks_save(&m) && ask("menu") == 10 && covers() == 10 && art_count() == 9);
-    SAME(ROW(0, CTX), "rotated.mp4"), SAME(ROW(0, SUB), "rotated \xc2\xb7 Less than a minute left");
+    SAME(ROW(0, CTX), "rotated.mp4"), SAME(ROW(0, SUB), "Less than a minute left \xc2\xb7 rotated");
     marks_free(&m);
     unlink(CARD "/.videos/marks");
 
@@ -903,7 +936,12 @@ static void check_covers(void) {
         CHECK(art_count() == off + 50);
     }
     SAME(CURSOR, "500");
-    CHECK(ask("dir\tLots\t500") == 20 && art_count() == 20), SAME(CURSOR, "");
+    /* The level asked again with other rows in it (videos copied meanwhile, another Sort): the
+     * covers are its rows' now, though none of the 500 kept is let go by a change of level. */
+    sh("for i in 1 2 3; do mkdir -p " V "Lots/c$i && : > " V "Lots/c$i/v.mp4 || exit 1; done");
+    CHECK(ask("dir\tLots") == 50 && row_arts() == 50 && art_count() == 50);
+    SAME(ROW(0, TITLE), "c1"), SAME(ROW(3, TITLE), "d100");
+    CHECK(ask("dir\tLots\t500") == 23 && art_count() == 23), SAME(CURSOR, "");
     CHECK(access(art_path("dir", "Lots/d100"), 0) &&
           same_file(art_path("dir", "Lots/d619"), "assets/tile-folder.jpg"));
     CHECK(ask("dir\tLots") == 50 && art_count() == 50 && !access(art_path("dir", "Lots/d100"), 0));
@@ -917,13 +955,46 @@ static void check_covers(void) {
     CHECK(key_of(CARD "/Videos", "h264-aac.mp4") != was);
     CHECK(ask("menu") == 9 && covers() == 8 && art_count() == 8 &&
           access(art_path("play", "h264-aac.mp4"), 0));
-    SAME(ROW(6, SUB), "3 MB");
+    SAME(ROW(6, SUB), "");
     CHECK(worker_pass(level, -1, -1) == 0 && access(thumb_file(was, path), 0));
     CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
     CHECK(ask("menu") == 9 && covers() == 9 && !access(art_path("play", "h264-aac.mp4"), 0));
     sh("truncate -s +1 " V "rotated.mp4"); /* and by its size */
     CHECK(ask("menu") == 9 && covers() == 8 && worker_pass(level, -1, -1) == 0 &&
           ask("menu") == 9 && covers() == 9);
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+
+    /* A cause that is not the file's and may pass: the video has the "no picture" tile while
+     * this server runs and is not tried again in that time, but no line is saved for it, so
+     * the next server tries it once more. Too little memory free for its frames (the host
+     * build's hook: a Q2 with 20 MB free, a 1080p video)... */
+    sh("cp -p '%s/big-1080p.mp4' " V, clips);
+    unsigned long long big = key_of(CARD "/Videos", "big-1080p.mp4");
+    setenv("VIDEOS_MEM_KB", "20000", 1);
+    CHECK(ask("menu") == 10 && covers() == 9 && worker_pass(level, -1, -1) == 0);
+    unsetenv("VIDEOS_MEM_KB");
+    CHECK((t = index_find(big)) && t->state == T_LATER && t->w == 1920 && t->h == 1080);
+    CHECK(ask("menu") == 10 && covers() == 10), SAME(ROW(3, CTX), "big-1080p.mp4");
+    SAME(ROW(3, SUB), "5 s"); /* what was read of it is shown */
+    CHECK(same_file(art_path("play", "big-1080p.mp4"), "assets/tile-nopicture.jpg"));
+    CHECK(worker_pass(level, -1, -1) == 0 && index_find(big)->state == T_LATER);
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+    index_free(), index_load(); /* the next server: its memory is free */
+    CHECK(!index_find(big) && worker_pass(level, -1, -1) == 0);
+    CHECK((t = index_find(big)) && t->state == T_PICTURE);
+    CHECK(index_lines(CARD, &pictures) == 12 && pictures == 3 && cache_files() == 4);
+    /* ...and a card that didn't take the thumbnail (a folder where it is written) */
+    char block[PATH_N + 8];
+    sh("touch -d @86400 " V "big-1080p.mp4"); /* another video, by its key */
+    big = key_of(CARD "/Videos", "big-1080p.mp4");
+    snprintf(block, sizeof block, "%s.new", thumb_file(big, path));
+    CHECK(!mkdir(block, 0755) && worker_pass(level, -1, -1) == 0);
+    CHECK((t = index_find(big)) && t->state == T_LATER && t->w == 1920 && !rmdir(block));
+    CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
+    index_free(), index_load();
+    CHECK(worker_pass(level, -1, -1) == 0 && index_find(big)->state == T_PICTURE);
+    unlink(V "big-1080p.mp4");
+    CHECK(worker_pass(level, -1, -1) == 0);
     CHECK(index_lines(CARD, &pictures) == 11 && pictures == 2 && cache_files() == 3);
 
     /* the cache tidied at a round's start: the lines and thumbnails of videos that are gone,
@@ -1070,46 +1141,87 @@ static void await_covers(int ms, int rows, int pictures) {
         n = covers() - 1;
         changes += n != had, had = n;
     }
-    CHECK(changes > 1); /* they came while the list was shown, the reply's bytes saying so */
+    CHECK(changes > 1); /* they came while the list was shown */
     for (int i = 0; i < rows; ++i) {
         if (strcmp(ROW(i, KIND), "screen")) continue;
         cover_ok(art_path("play", ROW(i, CTX)), &k);
         if (same_file(art_path("play", ROW(i, CTX)), "assets/tile-nopicture.jpg")) continue;
-        CHECK(k.luma > 60 && strstr(ROW(i, SUB), " sec"));
+        CHECK(k.luma > 60 && strstr(ROW(i, SUB), " s")); /* its length too */
         --pictures;
     }
     CHECK(!pictures);
+}
+
+/* The card of the run: these clips at the top, with killer.mp4, a copy of one, and huge.avi,
+ * made here; and two in a folder. Four have no picture to make a thumbnail of: one has none,
+ * one has a song's cover alone, one is in a codec the Q2 has no decoder for, and huge.avi's is
+ * 8192 x 4320, a frame the worker's cap on one allocation of FFmpeg's refuses. offset.ts is a
+ * transport stream with one keyframe. */
+static const char *const TOP[] = { "60fps.mp4",    "anamorphic.mp4", "audio-only.mp4",
+                                   "av1.mkv",      "big-1080p.mp4",  "cover.mp4",
+                                   "h264-aac.mp4", "hevc.mp4",       "mpeg4.avi",
+                                   "no-audio.mp4", "offset.ts",      "rotated.mp4",
+                                   "sidecar.mp4",  "vp9-opus.webm" };
+enum {
+    CLIPS = sizeof TOP / sizeof *TOP,
+    TOPS = CLIPS + 2, /* the videos at the top */
+    BLANK = 4,        /* audio-only.mp4, cover.mp4, av1.mkv, huge.avi */
+    ROWS = TOPS + 2,  /* the top's rows: the folder, the videos, Settings */
+    ALL = TOPS + 2    /* the card's videos */
+};
+
+/* The server's worker, its child: its pid, 0 when it has none. */
+static pid_t worker_of(pid_t pid) {
+    char cmd[64], out[32] = "";
+    snprintf(cmd, sizeof cmd, "pgrep -P %d", (int)pid);
+    FILE *p = popen(cmd, "r");
+    CHECK(p && (fgets(out, sizeof out, p), pclose(p) >= 0));
+    return atoi(out);
+}
+/* 1 when the process pid is no more, or is only waiting to be reaped. */
+static int dead(pid_t pid) {
+    char path[64], *stat, *state;
+    snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
+    if (!(stat = file_get(path, 0))) return 1;
+    int dead = !(state = strrchr(stat, ')')) || state[2] == 'Z' || state[2] == 'X';
+    free(stat);
+    return dead;
 }
 
 static void check_server(char **cmd, int host) {
     look_t k;
     int pictures, lock;
     sh("rm -rf " ECARD " " ETMP " && mkdir -p " ECARD "/Videos/Series " ECARD "/.videos " ETMP);
-    sh("cp -p '%s'/*.mp4 '%s'/*.avi '%s'/*.webm " ECARD "/Videos/ && cp -p '%s'/*.mkv " ECARD
-       "/Videos/Series/",
-       clips, clips, clips, clips);
+    for (int i = 0; i < CLIPS; ++i) sh("cp -p '%s/%s' " ECARD "/Videos/", clips, TOP[i]);
+    sh("cp -p '%s/ass.mkv' '%s/two-audio-subs.mkv' " ECARD "/Videos/Series/", clips, clips);
     sh("cp assets/tile-*.jpg " ECARD "/.videos/ && cp " ECARD "/Videos/60fps.mp4 " ECARD
        "/Videos/killer.mp4");
+    sh("'%s' -v error -y -f lavfi -i color=red:size=8192x4320:rate=1:duration=2 -c:v mjpeg -q:v "
+       "10 " ECARD "/Videos/huge.avi",
+       ffmpeg);
     text(ETMP "/q2-addon.caps", CAPS "\n");
     text(ETMP "/q2-videos.art.stale", "x"); /* not ours */
     sh("mkdir " ETMP "/q2-videos.art && touch " ETMP "/q2-videos.art/deadbeef.jpg " ETMP
        "/q2-videos.browse.sock");
 
     /* its start: an earlier run's socket and covers gone, the list answered before any thumbnail */
-    start(cmd, host ? "VIDEOS_CRASH=killer" : 0);
-    CHECK(ask("menu") == 13 && covers() == 2 && access(ETMP "/q2-videos.art/deadbeef.jpg", 0));
+    start(cmd, host ? "VIDEOS_CRASH=killer VIDEOS_MEM_KB=4000000" : 0);
+    CHECK(ask("menu") == ROWS && covers() == 2 && access(ETMP "/q2-videos.art/deadbeef.jpg", 0));
     row_is(0, "list", "dir", "Series", "2 videos", "Series", "");
-    row_is(12, "list", "settings", "Settings", "", "", "");
+    row_is(ROWS - 1, "list", "settings", "Settings", "", "", "");
     /* The thumbnails, as they come. The host build's worker dies on killer.mp4 (the checks'
      * hook, a decoder's crash): the server answers on, that video has the "no picture" tile, and
-     * the others their thumbnails. audio-only.mp4 has no picture either. */
-    await_covers(host ? 60000 : 240000, 12, host ? 9 : 10);
+     * the others their thumbnails. Its memory is said to be 4 GB free, so that huge.avi is
+     * refused by the cap and not for the memory of the computer the check runs on. */
+    await_covers(host ? 60000 : 240000, ROWS - 1, TOPS - BLANK - host);
     CHECK(ask("dir\tSeries") == 2);
     for (long long end = now_ms() + 60000; covers() < 2; nap(200))
         CHECK(now_ms() < end && ask("dir\tSeries") == 2);
-    CHECK(index_lines(ECARD, &pictures) == 13 && pictures == (host ? 11 : 12));
+    CHECK(index_lines(ECARD, &pictures) == ALL && pictures == ALL - BLANK - host);
     index_load();
     CHECK(index_find(key_of(ECARD "/Videos", "killer.mp4"))->state == (host ? T_NONE : T_PICTURE));
+    CHECK(index_find(key_of(ECARD "/Videos", "huge.avi"))->state == T_NONE);
+    CHECK(index_find(key_of(ECARD "/Videos", "offset.ts"))->state == T_PICTURE);
     index_free();
 
     /* a thumbnail deleted from the cache is made again, once its row's cover is looked for anew
@@ -1117,9 +1229,9 @@ static void check_server(char **cmd, int host) {
     char gone[PATH_N];
     snprintf(gone, sizeof gone, ECARD "/.videos/cache/%016llx.jpg",
              key_of(ECARD "/Videos", "mpeg4.avi"));
-    CHECK(!unlink(gone) && ask("menu") == 13);
-    for (long long end = now_ms() + 60000; access(gone, 0) || covers() < 13; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 13);
+    CHECK(!unlink(gone) && ask("menu") == ROWS);
+    for (long long end = now_ms() + 60000; access(gone, 0) || covers() < ROWS; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS);
     cover_ok(art_path("play", "mpeg4.avi"), &k);
     CHECK(same_file(art_path("play", "mpeg4.avi"), gone));
 
@@ -1144,13 +1256,13 @@ static void check_server(char **cmd, int host) {
     /* while a video plays (the player's lock) the worker makes nothing: a new video waits */
     CHECK((lock = lock_take(1)) >= 0);
     sh("cp " ECARD "/Videos/mpeg4.avi " ECARD "/Videos/new.avi");
-    CHECK(ask("menu") == 14 && covers() == 13);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS);
     nap(2500);
-    CHECK(ask("menu") == 14 && covers() == 13 && index_lines(ECARD, &pictures) == 13);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS && index_lines(ECARD, &pictures) == ALL);
     close(lock);
-    for (long long end = now_ms() + 60000; covers() < 14; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 14);
-    CHECK(index_lines(ECARD, &pictures) == 14 && pictures == (host ? 12 : 13));
+    for (long long end = now_ms() + 60000; covers() < ROWS + 1; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+    CHECK(index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL + 1 - BLANK - host);
     stop();
 
     /* started again: the cache is there, so every cover is in its first reply; and it is tidied
@@ -1161,14 +1273,15 @@ static void check_server(char **cmd, int host) {
     snprintf(line, sizeof line, "%016llx\t", key_of(ECARD "/Videos", "new.avi"));
     CHECK(!access(left, 0) && !unlink(ECARD "/Videos/new.avi"));
     start(cmd, 0);
-    CHECK(ask("menu") == 13 && covers() == 13);
+    CHECK(ask("menu") == ROWS && covers() == ROWS);
     for (long long end = now_ms() + 60000;; nap(100)) {
         CHECK(now_ms() < end && (lines = file_get(ECARD "/.videos/cache/index", 0)));
         int there = strstr(lines, line) != 0;
         free(lines);
         if (!there) break;
     }
-    CHECK(access(left, 0) && index_lines(ECARD, &pictures) == 13 && pictures == (host ? 11 : 12));
+    CHECK(access(left, 0) && index_lines(ECARD, &pictures) == ALL &&
+          pictures == ALL - BLANK - host);
     stop();
     /* a TERM while the worker is in the middle of a library */
     sh("rm -rf " ECARD "/.videos/cache");
@@ -1177,41 +1290,97 @@ static void check_server(char **cmd, int host) {
     start(cmd, 0);
     CHECK(ask("menu") == 50), SAME(MSG, "pages");
     nap(host ? 100 : 1500);
-    /* a player starting meanwhile has the lock once the video in the making is done, and keeps
-     * it: nothing is made under it */
+    /* a player starting meanwhile has the lock once the video in the making is done (that one,
+     * and one more if it began as the wait did), and keeps it: nothing is made under it */
     began = now_ms();
+    int before = index_lines(ECARD, &pictures);
     CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < THUMB_MS + 1000);
     int had = index_lines(ECARD, &pictures);
     nap(1200);
-    CHECK(index_lines(ECARD, &pictures) == had && had < 53); /* it was not through */
+    CHECK(index_lines(ECARD, &pictures) == had && had < ALL + 40); /* it was not through */
+    CHECK(had - before <= 2);
     close(lock);
     stop();
+    sh("rm -rf " ECARD "/Videos/copy*.mp4");
+
+    /* The launcher gone without its TERM (its shell killed, its trap not run): the server ends
+     * as on a TERM, its socket and art folder with it, and so is not there to take a later
+     * server's when it would have idled out. */
+    pid_t shell = fork();
+    if (!shell) {
+        start(cmd, 0);
+        pause();
+        _exit(0);
+    }
+    CHECK(shell > 0);
+    for (long long end = now_ms() + 20000; !up(); nap(20)) CHECK(now_ms() < end);
+    CHECK(ask("menu") == ROWS && !kill(shell, SIGKILL) && waitpid(shell, 0, 0) == shell);
+    for (long long end = now_ms() + 2000; !access(sock, 0) || !access(ETMP "/q2-videos.art", 0);
+         nap(20))
+        CHECK(now_ms() < end);
     if (!host) return;
 
     /* A decoder that never comes back (the host build's hook, on hang.mp4): the server ends that
      * worker after its time, here a second; the video has the "no picture" tile, the others
      * their thumbnails, and the lock is free again for a player. */
-    sh("rm -rf " ECARD "/Videos/copy*.mp4 " ECARD "/.videos/cache && cp " ECARD
-       "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
+    sh("rm -rf " ECARD "/.videos/cache && cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/hang.mp4");
     start(cmd, "VIDEOS_HANG=hang VIDEOS_STUCK_MS=1000");
-    CHECK(ask("menu") == 14);
-    for (long long end = now_ms() + 60000; covers() < 14; nap(200))
-        CHECK(now_ms() < end && ask("menu") == 14);
+    CHECK(ask("menu") == ROWS + 1);
+    for (long long end = now_ms() + 60000; covers() < ROWS + 1; nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
     CHECK(same_file(art_path("play", "hang.mp4"), "assets/tile-nopicture.jpg"));
     cover_ok(art_path("play", "killer.mp4"), &k);
-    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == 14 && pictures == 12);
+    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL - BLANK);
     began = now_ms();
     CHECK((lock = lock_take(1)) >= 0 && now_ms() - began < 1000);
     close(lock);
     stop();
     unlink(ECARD "/Videos/hang.mp4");
 
+    /* A worker the kernel killed for want of memory (here by hand, a second into its hang on
+     * oom.mp4): not the video's doing. It has the "no picture" tile while this server runs,
+     * the worker started next passes it by, and no line is saved for it... */
+    sh("cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/oom.mp4");
+    start(cmd, "VIDEOS_HANG=oom");
+    for (long long end = now_ms() + 15000; access(art_path("play", "oom.mp4"), 0); nap(100)) {
+        pid_t w = worker_of(server);
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+        if (w > 0) nap(1000), kill(w, SIGKILL);
+    }
+    CHECK(same_file(art_path("play", "oom.mp4"), "assets/tile-nopicture.jpg"));
+    nap(3000); /* the next worker is started within two seconds, and is soon through */
+    for (long long end = now_ms() + 5000; worker_of(server); nap(100)) CHECK(now_ms() < end);
+    CHECK(ask("menu") == ROWS + 1 && covers() == ROWS + 1);
+    CHECK(index_lines(ECARD, &pictures) == ALL && pictures == ALL - BLANK);
+    stop();
+    /* ...so the next server tries it once more: its thumbnail */
+    start(cmd, 0);
+    for (long long end = now_ms() + 60000; access(art_path("play", "oom.mp4"), 0); nap(200))
+        CHECK(now_ms() < end && ask("menu") == ROWS + 1);
+    cover_ok(art_path("play", "oom.mp4"), &k);
+    CHECK(k.luma > 60 && index_lines(ECARD, &pictures) == ALL + 1 && pictures == ALL + 1 - BLANK);
+    stop();
+    unlink(ECARD "/Videos/oom.mp4");
+
+    /* A server killed outright leaves no worker behind, even one that would never come back
+     * from a decoder. */
+    sh("cp " ECARD "/Videos/60fps.mp4 " ECARD "/Videos/orphan.mp4");
+    start(cmd, "VIDEOS_HANG=orphan");
+    pid_t orphan;
+    for (long long end = now_ms() + 5000; (orphan = worker_of(server)) <= 0; nap(50))
+        CHECK(now_ms() < end);
+    nap(500); /* it hangs by now */
+    CHECK(!dead(orphan) && !kill(server, SIGKILL) && ended(1000) == -1);
+    for (long long end = now_ms() + 2000; !dead(orphan); nap(20))
+        if (now_ms() >= end) kill(orphan, SIGKILL), CHECK(!"a worker left behind");
+    unlink(ECARD "/Videos/orphan.mp4");
+
     /* Idleness, the ten minutes as 1.5 s through the host build's hook: the server ends itself
      * with status 0 (run's loop then ends), counted from the last request... */
     start(cmd, "VIDEOS_IDLE_MS=1500");
     began = now_ms();
     nap(1000);
-    CHECK(ask("menu") == 13); /* a request at 1 s: 1.5 s from then */
+    CHECK(ask("menu") == ROWS); /* a request at 1 s: 1.5 s from then */
     CHECK(ended(1200) == -2 && ended(2500) == 0 && now_ms() - began > 2400);
     CHECK(access(sock, 0) && access(ETMP "/q2-videos.art", 0));
     /* ...and never while a video plays (the player's lock), during which Q2 Pod asks nothing,

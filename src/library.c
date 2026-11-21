@@ -2,11 +2,14 @@
  * texts and keys a row is made of. Nothing here opens a video; the server probes them. */
 #include "videos.h"
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 /* ---- Names --------------------------------------------------------------------------------- */
 
@@ -96,7 +99,7 @@ static int add(listing_t *l, const char *name, int dir, int count, const struct 
     }
     char *copy = strdup(name);
     if (!copy) return 0;
-    l->v[l->n++] = (entry_t){ copy, dir, count, st ? st->st_size : 0, st ? st->st_mtime : 0 };
+    l->v[l->n++] = (entry_t){ copy, dir, count, st ? st->st_size : 0, st ? st->st_mtime : 0, 0 };
     l->dirs += dir;
     return 1;
 }
@@ -154,8 +157,22 @@ static int by_name(const void *a, const void *b) {
 }
 static int by_newest(const void *a, const void *b) {
     const entry_t *x = a, *y = b;
-    if (x->dir || y->dir || x->mtime == y->mtime) return by_name(a, b);
-    return x->mtime > y->mtime ? -1 : 1;
+    if (x->dir || y->dir || x->added == y->added) return by_name(a, b);
+    return x->added > y->added ? -1 : 1;
+}
+/* When the video at path came to the card: its creation time, as Q2 Pod's own Recently Added
+ * has it (a copied file keeps the modification time it had), or, from a file system that keeps
+ * none, st's modification time. The system call itself: the Q2's glibc has statx() as a
+ * stand-in over fstatat, which knows no creation time. */
+static long long added(const char *path, const struct stat *st) {
+    struct statx sx;
+    int got = !syscall(SYS_statx, AT_FDCWD, path, 0, STATX_BTIME, &sx);
+#ifdef HOST /* the checks' file system keeps creation times: one that keeps none */
+    if (getenv("VIDEOS_NO_BTIME")) sx.stx_mask = 0;
+#endif
+    if (got && sx.stx_mask & STATX_BTIME && sx.stx_btime.tv_sec)
+        return sx.stx_btime.tv_sec * 1000000000ll + sx.stx_btime.tv_nsec;
+    return st->st_mtim.tv_sec * 1000000000ll + st->st_mtim.tv_nsec;
 }
 
 /* ponytail: a subfolder's count walks everything under it, each time its level is listed (a
@@ -174,8 +191,8 @@ int lib_list(const char *root, const char *rel, int sort, listing_t *l) {
         int k = kind(p, len, from, e, &st, 1), count;
         if (k == 'd' && (count = walk(p, len + 1 + strlen(e->d_name), from, 0)))
             add(l, e->d_name, 1, count, 0);
-        else if (k == 'v')
-            add(l, e->d_name, 0, 0, &st);
+        else if (k == 'v' && add(l, e->d_name, 0, 0, &st) && sort == SORT_NEWEST)
+            l->v[l->n - 1].added = added(p, &st);
     }
     closedir(d);
     if (l->n) qsort(l->v, (size_t)l->n, sizeof *l->v, sort == SORT_NEWEST ? by_newest : by_name);
@@ -236,7 +253,7 @@ const char *text_length(long long ms, char *out, size_t n) {
     if (ms <= 0)
         snprintf(out, n, "%s", "");
     else if (s < 60)
-        snprintf(out, n, "%lld sec", s ? s : 1);
+        snprintf(out, n, "%lld s", s ? s : 1);
     else if (min < 60)
         snprintf(out, n, "%lld min", min);
     else if (min % 60)

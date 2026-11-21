@@ -195,17 +195,6 @@ static int cover(unsigned key, int of, unsigned long long thumb) {
     return ok;
 }
 
-/* "refresh" into msg, spelt for the number of covers the reply's rows have. Q2 Pod looks at a
- * live level's reply only when its bytes differ from the one it shows (addon.c got(), a hash of
- * them), and only then counts the rows' covers again to draw the list anew. A thumbnail that
- * lands while no row's text changes (a video in progress, one already watched, one that can't be
- * decoded) would never show. So the count is in the bytes: each letter of the word whose bit is
- * set in it is written as its escape, which reads back as the same word. */
-static void live(char *msg, int covers) {
-    for (int i = 0; i < 7; ++i)
-        msg += sprintf(msg, covers >> i & 1 ? "%%%02X" : "%c", "refresh"[i]);
-}
-
 /* ---- The worker ---------------------------------------------------------------------------- */
 
 /* The worker is a child process (thumb.c says why), started when a level lists a video the index
@@ -218,6 +207,7 @@ static struct {
     int want;                  /* one is to start: a level has work for it, or the start's */
     int off;                   /* none is started any more: it can't work here */
     int told, fails;           /* lines it told since it started; deaths in a row on no video */
+    int killed;                /* the server has ended it itself, stuck on a video */
     long long next;            /* when one may start, a moment after one died */
     unsigned long long trying; /* the video it is on, 0 none, and since when */
     long long since;
@@ -257,7 +247,7 @@ static void worker_start(void) {
         return;
     }
     wk.to = to[1], wk.from = from[0];
-    wk.want = wk.told = 0, wk.sent = 1, wk.trying = 0;
+    wk.want = wk.told = wk.killed = 0, wk.sent = 1, wk.trying = 0;
 }
 
 /* What the worker told, taken; and its end, when it has shut its pipe. One that died takes the
@@ -276,6 +266,13 @@ static void worker_read(void) {
     waitpid(wk.pid, &status, 0);
     close(wk.to), close(wk.from);
     wk.pid = 0, wk.to = wk.from = -1;
+    /* Ended by a KILL that was not the server's: the kernel's, for want of memory (the worker is
+     * the first it takes). That is not the doing of the video it was on, which has no picture
+     * for now; and the death counts as one on no video, so three in a row start no fourth.
+     * ponytail: a KILL sent by hand reads the same, and costs that video its thumbnail until
+     * the server next starts. */
+    if (wk.trying && !wk.killed && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL)
+        index_put(&(thumb_t){ .key = wk.trying, .state = T_LATER }), wk.trying = 0;
     if (WIFEXITED(status) && !WEXITSTATUS(status)) {
         /* through. A level that still lists a video without a line starts another; one that
          * then has nothing to tell either is not started again for a while */
@@ -306,19 +303,17 @@ static int ctx_ok(const char *rel) {
 }
 
 /* A video's subtitle, by its state: what is left of one in progress, Watched, else its length,
- * and its size until the worker has read that. */
-static const char *state_text(const mark_t *m, const thumb_t *t, long long size, char *out,
-                              size_t n) {
+ * and nothing until the worker has read that. */
+static const char *state_text(const mark_t *m, const thumb_t *t, char *out, size_t n) {
     long long dur = m && m->dur_ms ? m->dur_ms : t ? t->dur_ms : 0;
     if (mark_unfinished(m)) return text_left(m->pos_ms, dur, out, n);
     if (m && m->flags & MARK_WATCHED) return snprintf(out, n, "Watched"), out;
-    return dur ? text_length(dur, out, n) : text_size(size, out, n);
+    return dur ? text_length(dur, out, n) : (*out = 0, out);
 }
 
 enum { I_CONTINUE, I_FOLDER, I_VIDEO, I_NONE, I_SETTINGS };
 typedef struct {
-    int type, i;      /* i: a folder's or a video's entry in the listing */
-    const thumb_t *t; /* a video's line of the index, once it has one */
+    int type, i; /* i: a folder's or a video's entry in the listing */
 } item_t;
 
 /* The level at rel ("" the top), from its row off on. Its rows: at the top Continue Watching,
@@ -335,7 +330,8 @@ static void level(rep_t *r, const char *rel, int off) {
     settings_t set;
     listing_t l;
     mark_t cw = { 0 };
-    int top = !*rel, n = 0, sent = 0, covers = 0, missing = 0;
+    const thumb_t *cw_line = 0; /* Continue Watching's video in the index, once it has a line */
+    int top = !*rel, n = 0, sent = 0, missing = 0;
 
     if (!has_cap("screen")) { /* Q2 Pod 1.8.9 and older: no row of ours would do anything */
         row(r, "info", "", "Update Q2 Pod to play videos", "This app needs Q2 Pod 1.9.0 or later",
@@ -359,8 +355,8 @@ static void level(rep_t *r, const char *rel, int off) {
     const mark_t *k = top && found ? lib_continue(root, &marks) : 0;
     if (k && ctx_ok(k->rel) && lib_path(root, k->rel, path, sizeof path) && !stat(path, &st)) {
         cw = *k, snprintf(cw_rel, sizeof cw_rel, "%s", k->rel);
-        item[n++] =
-            (item_t){ I_CONTINUE, 0, index_find(cache_key(cw_rel, st.st_size, st.st_mtime)) };
+        cw_line = index_find(cache_key(cw_rel, st.st_size, st.st_mtime));
+        item[n++].type = I_CONTINUE;
     }
     int first = n;
     for (int i = 0; i < l.n; ++i) {
@@ -368,19 +364,15 @@ static void level(rep_t *r, const char *rel, int off) {
          * bytes, or shorter with % in it, each three), though its row is left out */
         snprintf(ctx, sizeof ctx, "%s%s%s", rel, top ? "" : "/", l.v[i].name);
         if (!ctx_ok(ctx)) continue;
-        item[n] = (item_t){ l.v[i].dir ? I_FOLDER : I_VIDEO, i, 0 };
-        if (!l.v[i].dir) item[n].t = index_find(cache_key(ctx, l.v[i].size, l.v[i].mtime));
-        ++n;
+        item[n++] = (item_t){ l.v[i].dir ? I_FOLDER : I_VIDEO, i };
     }
     if (n == first) item[n++].type = I_NONE;
     if (top) item[n++].type = I_SETTINGS;
-    for (int i = 0; i < n; ++i)
-        missing |= (item[i].type == I_VIDEO || item[i].type == I_CONTINUE) && !item[i].t;
 
     /* Another level than the one shown last, or its rows from another COVERS on (More…, or Back
      * from there): the art folder is this one's now. Q2 Pod has let the other's rows go before
      * it asks; Settings, which has no covers, leaves the folder be. */
-    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off)) {
+    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off || arts == COVERS)) {
         art_clear();
         snprintf(shown, sizeof shown, "%s", rel), shown_off = off;
     }
@@ -388,7 +380,7 @@ static void level(rep_t *r, const char *rel, int off) {
     for (int i = off; i < n; ++i, ++sent) {
         const item_t *it = &item[i];
         const entry_t *e = l.n ? &l.v[it->i] : 0; /* a folder's or a video's alone */
-        const thumb_t *t = it->t;
+        const thumb_t *t = 0;                     /* a video's line of the index */
         unsigned key = 0;
         int ok, of = C_NONE;
         if (it->type == I_NONE)
@@ -405,13 +397,15 @@ static void level(rep_t *r, const char *rel, int off) {
         } else { /* a video: held Play/Pause marks it watched, or not */
             int again = it->type == I_CONTINUE;
             if (again)
-                snprintf(ctx, sizeof ctx, "%s", cw_rel);
-            else
+                snprintf(ctx, sizeof ctx, "%s", cw_rel), t = cw_line;
+            else {
                 snprintf(ctx, sizeof ctx, "%s%s%s", rel, top ? "" : "/", e->name);
-            state_text(again ? &cw : marks_find(&marks, ctx, e->size), t, again ? cw.size : e->size,
-                       text, sizeof text);
+                t = index_find(cache_key(ctx, e->size, e->mtime));
+            }
+            missing |= !t; /* looked for in the rows sent alone: a level may be thousands */
+            state_text(again ? &cw : marks_find(&marks, ctx, e->size), t, text, sizeof text);
             lib_title(ctx, name, sizeof name);
-            snprintf(sub, sizeof sub, "%s \xc2\xb7 %s", name, text);
+            snprintf(sub, sizeof sub, "%s \xc2\xb7 %s", text, name);
             ok = row(r, "screen", "play", again ? "Continue Watching" : name, again ? sub : text,
                      ctx, "mark");
             of = !t                      ? C_NONE
@@ -421,19 +415,22 @@ static void level(rep_t *r, const char *rel, int off) {
         }
         if (!ok) break;
         if (arty && it->type != I_NONE) {
-            int has = cover(key, of, t ? t->key : 0);
-            covers += has;
             /* a thumbnail gone from the cache: the worker's tidying has it made again */
-            missing |= of == C_THUMB && !has && access(thumb_file(t->key, path), 0);
+            missing |= !cover(key, of, t ? t->key : 0) && of == C_THUMB &&
+                       access(thumb_file(t->key, path), 0);
         }
     }
     if (off + sent < n) /* the rows after these, by this cursor */
         snprintf(r->cursor, sizeof r->cursor, "%d", off + sent),
             snprintf(r->msg, sizeof r->msg, "pages");
     else if (off || n > LIVE_ROWS)
+        /* ponytail: Q2 Pod asks a paged level once, so a thumbnail made after the level opened
+         * shows the next time it is opened, not in place. The worker is through the library
+         * soon after the server's start whatever is shown; a level this long kept live, 50
+         * rows at a time, if Q2 Pod ever asks a page again. */
         snprintf(r->msg, sizeof r->msg, "pages");
-    else
-        live(r->msg, covers);
+    else /* asked again every 2 s: Q2 Pod counts the rows' covers anew each time */
+        snprintf(r->msg, sizeof r->msg, "refresh");
     if (missing) worker_ask(rel);
     free(item), lib_free(&l);
 }
@@ -443,16 +440,16 @@ static void level(rep_t *r, const char *rel, int off) {
 static void settings_page(rep_t *r) {
     static const char *const OFF_ON[] = { "Off", "On" },
                              *const SIZE[] = { "Small", "Medium", "Large" },
-                             *const SORT[] = { "By Name", "Newest First" };
+                             *const SORT[] = { "By Name", "Recently Added" };
     settings_t s;
     settings_load(&s);
-    row(r, "action", "set", "Play Next", OFF_ON[s.next], "next", "");
+    row(r, "action", "set", "Autoplay", OFF_ON[s.next], "next", "");
     row(r, "action", "set", "Subtitles", OFF_ON[s.subs], "subs", "");
     row(r, "action", "set", "Subtitle Size", SIZE[s.subsize], "subsize", "");
     row(r, "action", "set", "Fit to Screen", OFF_ON[s.fill], "fill", "");
     row(r, "action", "set", "Sort", SORT[s.sort], "sort", "");
     row(r, "info", "", "Version", VERSION, "", "");
-    live(r->msg, 0);
+    snprintf(r->msg, sizeof r->msg, "refresh");
 }
 
 /* ---- Actions: their replies have no rows, and their message is the toast ------------------- */
@@ -466,8 +463,9 @@ static void set(rep_t *r, const char *key) {
         fail(r, "error", "Can't write to the card");
 }
 
-/* Held Play/Pause on a video's row: watched, or not watched again, which forgets its place too.
- * A mark there already is changed where it is, so Continue Watching keeps its order. */
+/* Held Play/Pause on a video's row: watched, or not watched again, its place kept either way (one
+ * marked by mistake is where it was). A mark there already is changed where it is, so Continue
+ * Watching keeps its order. */
 static void mark(rep_t *r, const char *rel) {
     char root[PATH_N], path[PATH_N];
     struct stat st;
@@ -480,7 +478,7 @@ static void mark(rep_t *r, const char *rel) {
     mark_t *k = marks_find(&marks, rel, st.st_size);
     int watched = !(k && k->flags & MARK_WATCHED);
     if (!watched)
-        k->flags &= ~MARK_WATCHED, k->pos_ms = 0;
+        k->flags &= ~MARK_WATCHED;
     else if (k || (k = marks_put(&marks, rel, st.st_size)))
         k->flags |= MARK_WATCHED;
     if (!k || !marks_save(&marks))
@@ -576,6 +574,9 @@ int serve_main(void) {
 #endif
     sigaction(SIGTERM, &sa, 0), sigaction(SIGINT, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
+    /* The launcher gone without its TERM (its shell killed): the server ends now as on one. It
+     * would else idle out later, and take the next server's socket and art folder with it. */
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (snprintf(addr.sun_path, sizeof addr.sun_path, "%s/q2-videos.browse.sock", tmp_dir) >=
         (int)sizeof addr.sun_path)
         return 1;
@@ -598,7 +599,7 @@ int serve_main(void) {
         }
         now = now_ms();
         /* a worker that is stuck: ended here, and seen to by worker_read as any that died */
-        if (wk.pid > 0 && wk.trying && now - wk.since > stuck) kill(wk.pid, SIGKILL);
+        if (wk.pid > 0 && wk.trying && now - wk.since > stuck) wk.killed = !kill(wk.pid, SIGKILL);
         /* A video playing: Q2 Pod asks nothing meanwhile, which is not idleness, and the ten
          * minutes start again when the player ends. No worker is started under it either. */
         if ((fd = lock_take(0)) < 0)

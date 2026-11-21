@@ -2,6 +2,7 @@
  * whole files and the lock, the settings and the marks, the names and their order, the rows'
  * texts and keys, and a library made in build/check-card. */
 #include "check.h"
+#include <sys/syscall.h>
 
 #define CARD "build/check-card"
 #define TMP "build/check-tmp"
@@ -232,8 +233,8 @@ static void check_names(void) {
     SAME(lib_title("Long Name.mkv", tiny, 5), "Long");
 
     SAME(text_length(0, t, sizeof t), ""), SAME(text_length(-5, t, sizeof t), "");
-    SAME(text_length(400, t, sizeof t), "1 sec"), SAME(text_length(45000, t, sizeof t), "45 sec");
-    SAME(text_length(59499, t, sizeof t), "59 sec"), SAME(text_length(59500, t, sizeof t), "1 min");
+    SAME(text_length(400, t, sizeof t), "1 s"), SAME(text_length(45000, t, sizeof t), "45 s");
+    SAME(text_length(59499, t, sizeof t), "59 s"), SAME(text_length(59500, t, sizeof t), "1 min");
     SAME(text_length(89000, t, sizeof t), "1 min"), SAME(text_length(90000, t, sizeof t), "2 min");
     SAME(text_length(24 * 60000, t, sizeof t), "24 min");
     SAME(text_length(59 * 60000 + 29000, t, sizeof t), "59 min");
@@ -313,10 +314,19 @@ static void check_library(void) {
     CHECK(!l.v[3].dir && l.v[3].size == 30 && l.v[3].mtime == 2000 && l.v[5].size == 10);
     lib_free(&l);
     CHECK(!l.v && !l.n);
+    /* Recently Added: by when each came to the card, the last first, or, on a file system that
+     * keeps no creation time, by when each last changed. Episode 10 is put there anew: the last
+     * to come, and the first changed. */
+    struct statx sx;
+    usleep(20000); /* past a tick of the file system's clock */
+    unlink(V "Episode 10.mkv"), file(V "Episode 10.mkv", 10, 1000);
+    int born = !syscall(SYS_statx, AT_FDCWD, V "Episode 10.mkv", 0, STATX_BTIME, &sx) &&
+               sx.stx_mask & STATX_BTIME;
     CHECK(lib_list(root, "", SORT_NEWEST, &l) && l.n == 6 && l.dirs == 3);
     SAME(l.v[0].name, "Deep"), SAME(l.v[2].name, "Series"); /* folders keep their order */
-    SAME(l.v[3].name, "episode 2.mkv"), SAME(l.v[4].name, "Episode 1.MP4");
-    SAME(l.v[5].name, "Episode 10.mkv");
+    SAME(l.v[3].name, born ? "Episode 10.mkv" : "episode 2.mkv"),
+        SAME(l.v[4].name, "Episode 1.MP4");
+    SAME(l.v[5].name, born ? "episode 2.mkv" : "Episode 10.mkv");
     lib_free(&l);
 
     CHECK(lib_list(root, "Series", SORT_NAME, &l) && l.n == 2 && l.dirs == 2);
@@ -350,7 +360,8 @@ static void check_library(void) {
     CHECK(lib_next(root, "Episode 1.MP4", SORT_NAME, p, sizeof p)), SAME(p, "episode 2.mkv");
     CHECK(lib_next(root, "episode 2.mkv", SORT_NAME, p, sizeof p)), SAME(p, "Episode 10.mkv");
     CHECK(!lib_next(root, "Episode 10.mkv", SORT_NAME, p, sizeof p)); /* the last */
-    CHECK(lib_next(root, "episode 2.mkv", SORT_NEWEST, p, sizeof p)), SAME(p, "Episode 1.MP4");
+    CHECK(lib_next(root, "Episode 1.MP4", SORT_NEWEST, p, sizeof p));
+    SAME(p, born ? "episode 2.mkv" : "Episode 10.mkv");
     CHECK(lib_next(root, "Series/Season 1/a.mkv", SORT_NAME, p, sizeof p));
     SAME(p, "Series/Season 1/b.avi");
     CHECK(!lib_next(root, "Series/Season 1/b.avi", SORT_NAME, p, sizeof p));

@@ -5,8 +5,9 @@
 # (the player's over tools/clips.sh's clips, with the rootfs's font), `make check-q2` starts the
 # Q2's binary under qemu against the Q2's libraries, and `make qemu-check` has it play there.
 SYSROOT ?= $(HOME)/.cache/q2/sysroot
-ROOTFS ?= $(lastword $(sort $(wildcard $(HOME)/git/q2/q2-pod/dist/*/rootfs.squashfs \
-                                       $(HOME)/git/q2/q2-pod/dist/*/build/rootfs.squashfs)))
+# The last by version of Q2 Pod's builds: the highest release's, or a dev build's without one.
+ROOTFS ?= $(shell ls $(HOME)/git/q2/q2-pod/dist/*/rootfs.squashfs \
+                     $(HOME)/git/q2/q2-pod/dist/*/build/rootfs.squashfs 2>/dev/null | sort -V | tail -n 1)
 FFMPEG ?= $(HOME)/.cache/q2-videos/ffmpeg-4.2
 VERSION := $(shell cat VERSION)
 CC_Q2 = clang -D_GNU_SOURCE --target=mipsel-linux-gnu --sysroot=$(SYSROOT) -march=mips32r2 -mabi=32 -mfp64 -mnan=2008 -mabs=2008
