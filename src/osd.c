@@ -200,25 +200,24 @@ void osd_draw(pix *page, const osd_t *o) {
     if (o->plain) fill(page, 0, 0, VIEW_W, VIEW_H, 0x000000, 255);
     if (o->message) { /* a whole screen: the title, what is going on, and why */
         char lines[4][LINE_N];
-        int w = VIEW_W - 2 * clear_x(100, 219),
-            n = o->reason ? text_wrap(o->reason, 16, w, lines, 4) : 0;
+        int w = VIEW_W - 48, n = o->reason ? text_wrap(o->reason, 16, w, lines, 4) : 0;
         int y = (VIEW_H - (o->reason ? 62 + n * 22 : 50)) / 2;
         centred(page, y, o->title, o->reason ? 15 : 18, w, o->reason ? 0x8a8a8a : WHITE);
         centred(page, y + 28, o->message, o->reason ? 20 : 16, w, o->reason ? WHITE : 0x9a9a9a);
         for (int i = 0; i < n; ++i) centred(page, y + 62 + i * 22, lines[i], 16, w, 0xaaaaaa);
         return;
     }
-    if (o->plain)
-        centred(page, 151, o->title, 18, VIEW_W - 2 * clear_x(151, 169), WHITE); /* sound alone */
-    int band = o->controls || o->volume >= 0; /* the bottom band is up */
+    if (o->plain && !o->controls)
+        centred(page, 151, o->title, 18, VIEW_W - 48, WHITE); /* sound alone */
+    int band = o->controls || o->volume >= 0;                 /* the bottom band is up */
     if (o->subs && *o->subs) {
         /* Up to three lines, the last above the bottom edge or the band, each no wider than the
          * glass's corners leave at the lowest of them. */
         static const int sizes[3] = { 18, 22, 26 };
         char lines[3][LINE_N];
         int px = sizes[o->subsize < 0 || o->subsize > 2 ? 1 : o->subsize], step = px + 4;
-        int bottom = band ? BOTTOM_Y - 6 : VIEW_H - 21;
-        int n = text_wrap(o->subs, px, VIEW_W - 2 * clear_x(bottom - 3 * step, bottom), lines, 3);
+        int bottom = band ? BOTTOM_Y - 6 : VIEW_H - 21, side = clear_x(bottom - 3 * step, bottom);
+        int n = text_wrap(o->subs, px, VIEW_W - 2 * (side < 20 ? 20 : side), lines, 3);
         for (int i = 0; i < n; ++i)
             text_outlined(page, (VIEW_W - text_w(lines[i], px, 0)) / 2, bottom - (n - i) * step + 2,
                           lines[i], px);

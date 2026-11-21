@@ -242,8 +242,11 @@ const char *lang_name(const char *code) {
     return code;
 }
 
+/* the file with the video's own name first: it is the one shown by default */
 static int by_path(const void *a, const void *b) {
-    return natcmp(((const sidecar_t *)a)->path, ((const sidecar_t *)b)->path);
+    const sidecar_t *x = a, *y = b;
+    int own = !strcmp(y->name, "External") - !strcmp(x->name, "External");
+    return own ? own : natcmp(x->path, y->path);
 }
 
 int sidecars(const char *path, sidecar_t *out, int max) {

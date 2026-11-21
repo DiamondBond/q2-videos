@@ -6,7 +6,12 @@
  * Q2 Pod's conventions: the wheel is the volume and Centre turns it to seeking, Play/Pause
  * pauses and held opens the options, the side buttons skip, Return goes back. Q2 Pod sends no
  * long presses, so holds are timed here from a key's down to its up; a key's up counts only
- * when its down was seen, as the Centre that chose the video is released after we start. */
+ * when its down was seen, as the Centre that chose the video is released after we start.
+ *
+ * Nothing the user does ends the run on a press: once this process is gone Q2 Pod gives the
+ * input to what is under it, where the release of a press made here would act on its own
+ * (Play/Pause's starts the music). So a key or a touch ends the run as it is let go, and a run
+ * that ends by itself waits a moment for what is down (let_go). */
 #include "player.h"
 #include <fcntl.h>
 #include <pthread.h>
@@ -18,9 +23,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <libavutil/log.h>
 
-#define CONTROLS_MS                                                                                \
-    3000 /* the controls stay this long, and seek mode after the wheel's last tick */
+#define CONTROLS_MS 3000 /* the controls stay, and seek mode after the wheel's last tick */
 #define VOLUME_MS 1500
 #define BADGE_MS 800
 #define NOTICE_MS 4000
@@ -34,7 +39,10 @@
 #define ERROR_MS 10000    /* a video that can't be played says so this long */
 #define END_KEEP 5000     /* the wheel and a finger never go nearer the end than this */
 #define HOLD_MAX 30000    /* a side button down this long has lost its release */
-#define SIDES 8           /* subtitle files beside a video */
+#define LET_GO_MS 2000    /* at the end, what is down is waited for this long */
+#define LET_GO_TERM 300   /* and this long when Q2 Pod ends the run */
+/* ponytail: of more subtitle files beside a video than this, the first the folder lists */
+#define SIDES 8
 
 /* ---- The pure parts ------------------------------------------------------------------------ */
 
@@ -85,7 +93,7 @@ int event_parse(const char *msg, event_t *e) {
 
 enum { MENU_NONE, MENU_OPTIONS, MENU_AUDIO, MENU_SUBS, MENU_CHAPTERS };
 enum { ROW_AUDIO, ROW_SUBS, ROW_FIT, ROW_CHAPTERS, ROW_START }; /* what a row of Options does */
-enum { K_RETURN, K_PLAY, K_CENTRE, K_BACK, K_FWD, KEYS };
+enum { K_RETURN, K_PLAY, K_CENTRE, K_BACK, K_FWD, KEYS, FINGER = KEYS };
 enum { END_NOT, END_OVER, END_QUIT }; /* how a video ends: played out, or left */
 
 static struct { /* the run's */
@@ -98,7 +106,9 @@ static struct { /* the run's */
     int volume, told;   /* the Q2's volume as shown, and as Q2 Pod last said it; -1 not yet */
     long long asked_at; /* when a level was last asked for; 0 once Q2 Pod's word is taken */
     int dim, stuck;
+    unsigned held;   /* what went down here and has not come up: a bit a K_, and FINGER */
     pix *cur, *page; /* the picture on show, and the frame drawn over a copy of it */
+    const pix *out;  /* which of them the screen has */
 } P;
 
 static struct { /* the video's: zeroed for each */
@@ -133,8 +143,7 @@ static struct { /* the video's: zeroed for each */
     int repeats;          /* a held side button's steps so far */
     int wheel_acc, run;   /* the wheel: short of a tick, and the ticks of this turn */
     long long wheel_at, tick_at;
-    long long pend_ms,
-        pend_at; /* a place the wheel or a finger is choosing (-1 none), sent at pend_at */
+    long long pend_ms, pend_at; /* a place being chosen (-1 none), sent at pend_at */
     int touching, drag, moved, tx, ty, tap_third;
     long long touch_at, tap_at;
     long long input_at, saved_at;
@@ -183,15 +192,14 @@ static int save_done(int ms) {
 }
 
 /* The marks to the card, by a thread of their own from a copy: the card's sync takes a moment
- * the picture hasn't got. One at a time; when the last is still at the card after a second, the
- * card is stuck and this one would be too. */
+ * the picture hasn't got. One at a time: when the last is still at the card 300 ms on this one
+ * is left out, as the last has nearly the same place, or the card is stuck and this would be. */
 static void save(void) {
-    marks_t *c = save_done(1000) ? malloc(sizeof *c) : 0;
+    marks_t *c = save_done(300) ? malloc(sizeof *c) : 0;
     if (!c) return;
     *c = marks;
     for (int i = 0; i < c->n; ++i)
-        if (!(c->v[i].rel =
-                  strdup(marks.v[i].rel))) { /* no memory: nothing written, the file stays */
+        if (!(c->v[i].rel = strdup(marks.v[i].rel))) { /* no memory: the file stays as it is */
             c->n = i;
             marks_free(c);
             free(c);
@@ -201,13 +209,16 @@ static void save(void) {
     if (!saving) save_main(c);
 }
 
-/* The video's mark as it stands: watched at its end, else the place. */
-static void mark_now(void) {
+/* The video's mark as it stands, to the card: watched at its end, else the place. */
+static void place_save(long long now) {
+    V.saved_at = now;
     if (!V.mark) return;
     if (V.end == END_OVER)
         V.mark->flags |= MARK_WATCHED, V.mark->pos_ms = 0;
     else
         mark_place(V.mark, V.at_ms, V.m->dur_ms);
+    save();
+    say("save pos=%lld watched=%u", V.mark->pos_ms, V.mark->flags & MARK_WATCHED);
 }
 
 /* ---- Subtitles ----------------------------------------------------------------------------- */
@@ -298,7 +309,7 @@ static void pause_set(int on, long long now) {
     V.paused = on;
     eng_pause(on);
     V.controls_until = now + CONTROLS_MS;
-    if (on) mark_now(), save(), V.saved_at = now;
+    if (on) place_save(now);
 }
 
 /* The volume file, whole: a level for Q2 Pod to set, or "?" to be told it. */
@@ -444,23 +455,29 @@ static void side(int dir, int secs, long long now) {
         step(dir * secs, now);
 }
 
-static void key(const event_t *e, long long now) {
+static int key_of(int code) { /* K_, -1 for a key that is none of ours */
     static const int codes[KEYS] = { KEY_RETURN, KEY_PLAY, KEY_CENTRE, KEY_BACK, KEY_FWD };
-    int k = 0;
-    while (k < KEYS && codes[k] != e->a) ++k;
-    if (k == KEYS) return;
+    int k = KEYS - 1;
+    while (k >= 0 && codes[k] != code) --k;
+    return k;
+}
+
+static void key(const event_t *e, long long now) {
+    int k = key_of(e->a);
+    if (k < 0) return;
     if (e->what == 'd') {
-        if (V.down[k]) return; /* a held key's repeat */
+        if (P.held >> k & 1) return; /* a held key's repeat, whichever video it went down in */
+        P.held |= 1u << k;
         V.down[k] = now, V.repeats = 0;
-        if (V.state == ENG_FAILED) V.end = END_QUIT; /* any key leaves the message */
         if (k == K_BACK || k == K_FWD) side(k == K_FWD ? 1 : -1, 10, now);
         return;
     }
-    int ours = V.down[k] != 0; /* else its press was the list's, or a hold has spent it */
-    V.down[k] = 0;
+    /* not ours: its press was the list's or the video's before, or a hold has spent it */
+    int ours = V.down[k] != 0;
+    P.held &= ~(1u << k), V.down[k] = 0;
     if (!ours) return;
-    if (V.state != ENG_READY) { /* not open yet: Return alone does anything */
-        if (k == K_RETURN) V.end = END_QUIT;
+    if (V.state != ENG_READY) { /* any key leaves the message; Return a video still opening */
+        if (V.state == ENG_FAILED || k == K_RETURN) V.end = END_QUIT;
         return;
     }
     if (k == K_PLAY && !V.level)
@@ -529,20 +546,23 @@ static void tap(int x, int y, long long now) {
 static void touch(const event_t *e, long long now) {
     int x = e->a, y = e->b;
     if (e->what == 'd') {
+        P.held |= 1u << FINGER;
         V.touching = 1, V.moved = 0, V.tx = x, V.ty = y, V.touch_at = now;
-        if (V.state == ENG_FAILED) V.end = END_QUIT;
         /* a finger on the bar takes the place along with it */
         if (V.state == ENG_READY && !V.level && controls_shown(now) && hit(x, y) == HIT_BAR &&
             V.m->dur_ms > 0)
             V.drag = 1, V.pend_ms = keep(bar_ms(x, V.m->dur_ms));
         return;
     }
+    if (e->what == 'u') P.held &= ~(1u << FINGER);
     if (!V.touching) return; /* it began before the video did */
     if (abs(x - V.tx) > 12 || abs(y - V.ty) > 12) V.moved = 1;
     if (V.drag) V.pend_ms = keep(bar_ms(x, V.m->dur_ms));
     if (e->what != 'u') return;
     V.touching = 0;
-    if (V.drag) {
+    if (V.state == ENG_FAILED)
+        V.end = END_QUIT; /* a touch leaves the message */
+    else if (V.drag) {
         V.drag = 0;
         seek_send(now);
     } else if (!V.moved && now - V.touch_at <= 500 && V.state == ENG_READY)
@@ -568,8 +588,8 @@ static void input(const event_t *e, long long now) {
 
 /* What has come due. */
 static void timers(long long now) {
-    if (V.down[K_PLAY] &&
-        now - V.down[K_PLAY] >= HOLD_MS) { /* Play/Pause held: the options, or out of them */
+    /* Play/Pause held: the options, or out of them */
+    if (V.down[K_PLAY] && now - V.down[K_PLAY] >= HOLD_MS) {
         V.down[K_PLAY] = 0;
         if (V.state == ENG_READY && !V.level)
             menu_open(MENU_OPTIONS, 0);
@@ -578,21 +598,20 @@ static void timers(long long now) {
     }
     for (int k = K_BACK; k <= K_FWD; ++k) { /* a side button held: its steps */
         long long held = V.down[k] ? now - V.down[k] : 0;
-        if (held > HOLD_MAX) V.down[k] = 0, held = 0;
+        if (held > HOLD_MAX) V.down[k] = 0, P.held &= ~(1u << k), held = 0;
         while (V.repeats < hold_repeats(held))
             side(k == K_FWD ? 1 : -1, hold_step(500 + 250 * V.repeats), now), ++V.repeats;
     }
     if (V.pend_ms >= 0 && !V.drag && now >= V.pend_at) seek_send(now); /* the wheel rested */
-    if (P.asked_at &&
-        now - P.asked_at >= VOLUME_SETTLE) { /* our asking is old: Q2 Pod's word counts */
+    /* our asking is old: Q2 Pod's word counts */
+    if (P.asked_at && now - P.asked_at >= VOLUME_SETTLE) {
         P.asked_at = 0;
         if (P.told >= 0 && P.told != P.volume) P.volume = P.told, V.volume_until = now + VOLUME_MS;
     }
     if (V.paused && !P.dim && now - V.input_at >= DIM_MS)
         P.dim = 1, close(open(P.dim_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0644));
     if (V.paused && now - V.input_at >= IDLE_MS) V.end = END_QUIT;
-    if (V.state == ENG_READY && !V.paused && now - V.saved_at >= SAVE_MS)
-        mark_now(), save(), V.saved_at = now;
+    if (V.state == ENG_READY && !V.paused && now - V.saved_at >= SAVE_MS) place_save(now);
     if (V.error_until && now >= V.error_until) V.end = END_QUIT;
 }
 
@@ -621,8 +640,8 @@ static int wait_ms(long long now) {
                                                                  : 0,
     };
     for (size_t i = 0; i < sizeof due / sizeof *due; ++i)
-        if (due[i] > 0 && due[i] < at) at = due[i];
-    return at > now ? (int)(at - now) : 0;
+        if (due[i] > now && due[i] < at) at = due[i]; /* what is past was seen to this pass */
+    return (int)(at - now);
 }
 
 /* ---- The frame ----------------------------------------------------------------------------- */
@@ -669,7 +688,7 @@ static void frame(long long now, int force) {
         osd_draw(P.page, &o);
         out = P.page;
     }
-    P.plat->show(out);
+    P.plat->show(P.out = out);
     if (V.shot) {
         char text[sizeof V.subtext];
         snprintf(text, sizeof text, "%s", V.subtext);
@@ -680,16 +699,47 @@ static void frame(long long now, int force) {
             "told=%d menu=%d sel=%d "
             "sub=%d audio=%d fill=%d geom=%d,%d,%d,%d frames=%lld tone=%d level=%d lost=%d "
             "silent=%d dim=%d badge=%d "
-            "serial=%d notice=%s| text=%s",
+            "serial=%d gain=%d queued=%lld notice=%s| text=%s",
             V.shot, now, V.state, o.pos_ms, V.s.pic_ms, V.paused, o.controls, o.knob, o.volume,
             P.told, V.level, V.menu.sel, V.sub, V.audio, P.set.fill, V.s.geom.vx, V.s.geom.vy,
             V.s.geom.vw, V.s.geom.vh, V.s.frames, V.s.tone, V.s.level, V.s.lost, V.s.silent, P.dim,
-            o.badge, V.s.serial, o.notice ? o.notice : "", text);
+            o.badge, V.s.serial, P.gain, V.s.queued, o.notice ? o.notice : "", text);
         V.shot = 0;
     }
 }
 
 /* ---- A video ------------------------------------------------------------------------------- */
+
+/* The run is over: what went down here is waited for (see the top), the last frame left up. A
+ * release can be lost, so no longer than LET_GO_MS after a key's last repeat; and when it is
+ * Q2 Pod that ends the run, by a held Return whose release it keeps to itself, the other keys
+ * get a moment at most, as it kills what is still there three seconds on. */
+static void let_go(void) {
+    event_t e;
+    for (long long until = now_ms() + LET_GO_MS;;) {
+        long long now = now_ms();
+        if (term) {
+            P.held &= ~(1u << K_RETURN);
+            if (until > now + LET_GO_TERM) until = now + LET_GO_TERM;
+        }
+        if (!P.held || now >= until) return;
+        if (!P.plat->wait((int)(until - now), &e)) continue;
+        if (e.kind == 's') script_shot(e.arg, P.out), say("shot=%s held=%u", e.arg, P.held);
+        int k = e.kind == 'k' ? key_of(e.a) : e.kind == 't' ? FINGER : -1;
+        if (k < 0 || e.what == 'm') continue;
+        if (e.what == 'u')
+            P.held &= ~(1u << k);
+        else if (!term) {
+            if (P.held >> k & 1) until = now_ms() + LET_GO_MS; /* a repeat: it is down yet */
+            P.held |= 1u << k;
+        }
+    }
+}
+
+static void *lock_main(void *unused) {
+    lock_take(1); /* its fd is the process's to the end */
+    return 0;
+}
 
 /* The engine says the video is open: its mark, its tracks, the subtitles wanted. */
 static void opened(long long now) {
@@ -732,7 +782,7 @@ static int play(const char *rel) {
         V.nside = sidecars(V.path, V.side, SIDES);
         V.own = sub < 0;
         V.want = sub > 0 ? sub - 1 : sub < 0 && P.set.subs ? 0 : -1;
-        V.state = ENG_OPENING;
+        V.state = ENG_OPENING, V.why = 0; /* the engine's to say */
         eng_open(V.path, V.start_ms, P.device, P.gain, k ? k->audio : -1,
                  V.want >= V.nside ? V.want - V.nside : -1, P.set.fill);
     }
@@ -755,7 +805,7 @@ static int play(const char *rel) {
         if (V.state != was) { /* it opened, or can't be */
             if (V.state == ENG_READY) opened(now);
             if (V.state == ENG_FAILED) {
-                if (was == ENG_OPENING) V.why = eng_why();
+                if (!V.why) V.why = eng_why();
                 V.error_until = now + ERROR_MS;
                 say("fail %s", V.why);
             }
@@ -770,7 +820,7 @@ static int play(const char *rel) {
         }
         frame(now, got && e.kind == 's');
     }
-    if (V.state == ENG_READY) mark_now(), save();
+    if (V.state == ENG_READY) place_save(now);
     say("end %s %s pos=%lld", rel, V.end == END_OVER ? "over" : term ? "term" : "quit", V.at_ms);
     P.stuck = !eng_close();
     return V.end;
@@ -779,8 +829,9 @@ static int play(const char *rel) {
 int player_main(int argc, char **argv) {
     const char *uri = getenv("Q2_URI"), *rel = getenv("Q2_CONTEXT");
     char next[REL_MAX + 1];
-    setenv("LIBASOUND_THREAD_SAFE", "0",
-           1); /* alsa-lib 1.1.6 deadlocks in its own locking otherwise */
+    av_log_set_level(AV_LOG_QUIET); /* what FFmpeg has to say of a file, the screen says */
+    /* alsa-lib 1.1.6 deadlocks in its own locking otherwise */
+    setenv("LIBASOUND_THREAD_SAFE", "0", 1);
 #if defined(__mips__)
     /* The Q2's FPU traps on a denormal and the kernel then does the sum by hand, a thousand
      * times slower: a decoder's filter fading to silence is full of them. Flushed to zero
@@ -799,7 +850,11 @@ int player_main(int argc, char **argv) {
     struct sigaction sa = { .sa_handler = on_term, .sa_flags = SA_RESTART };
     sigaction(SIGTERM, &sa, 0), sigaction(SIGINT, &sa, 0);
     signal(SIGPIPE, SIG_IGN);
-    int lock = lock_take(1); /* held to the end: the server's thumbnails wait */
+    /* The lock that keeps the page's thumbnails off the Q2 while a video plays, held from when
+     * it is had to the end. Taken by a thread of its own that is never waited for: a thumbnail
+     * in the making keeps it for seconds, and the video shouldn't start that much later. */
+    pthread_t locker;
+    if (!pthread_create(&locker, 0, lock_main, 0)) pthread_detach(locker);
     if (!P.plat->open()) {
         fprintf(stderr, "q2-videos: no Q2 screen%s\n",
                 P.plat == &plat_script ? ", and no script in $VIDEOS_SCRIPT" : "");
@@ -829,13 +884,13 @@ int player_main(int argc, char **argv) {
     /* a video played out is followed by the next in its folder, when Play Next says so */
     while (play(next) == END_OVER && !P.stuck && !term && P.set.next &&
            lib_next(P.root, V.rel, P.set.sort, next, sizeof next)) {}
-    save_done(1500); /* the place reaches the card before the screen is given back */
+    if (!P.stuck) let_go();
+    save_done(1200); /* the place reaches the card before the screen is given back */
     if (P.dim) unlink(P.dim_path);
     P.plat->close();
     if (P.stuck || !save_done(0)) _exit(0); /* a thread is still in the card's or ALSA's hands */
     cues_free(&V.cues);
     marks_free(&marks);
     free(P.cur), free(P.page);
-    if (lock >= 0) close(lock);
     return 0;
 }

@@ -75,17 +75,16 @@ void rbox(pix *page, int x, int y, int w, int h, float r, pix rgb, int alpha, co
         side = edge < (w + 1) / 2 ? edge : (w + 1) / 2; /* a corner's columns */
     for (int i = 0; i < h; ++i) {
         pix c = rows ? rows[i] : rgb;
-        float py = (float)i + 0.5f;
-        float qy = py<r ? r - py : py>(float) h - r ? py - ((float)h - r) : 0; /* into a corner */
-        if (qy <= 0) { /* a row between the corners */
+        float py = (float)i + 0.5f, low = (float)h - r;
+        float qy = r > py ? r - py : py > low ? py - low : 0; /* into a corner */
+        if (qy <= 0) {                                        /* a row between the corners */
             if (rows || i < edge || i >= h - edge) fill(page, x, y + i, w, 1, c, alpha);
             continue;
         }
         for (int k = 0; k < side; ++k) { /* the corner's pixels: the left one and its mirror */
             float qx = r - ((float)k + 0.5f);
-            int a =
-                (int)((float)alpha * (qx <= 0 ? 1 : sat(0.5f - (sqrtf(qx * qx + qy * qy) - r))) +
-                      0.5f);
+            float in = qx <= 0 ? 1 : sat(0.5f - (sqrtf(qx * qx + qy * qy) - r));
+            int a = (int)((float)alpha * in + 0.5f);
             dot(page, x + k, y + i, c, a);
             if (w - 1 - k != k) dot(page, x + w - 1 - k, y + i, c, a);
         }
