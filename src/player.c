@@ -338,12 +338,19 @@ static void step(int secs, int fresh, long long now) {
 
 static void pause_set(int on, long long now) {
     if (V.state != ENG_READY) return;
-    if (!on && V.s.lost) eng_output(); /* Play after the output was lost: the device once more */
+    if (!on && V.s.lost) eng_output(); /* on after the output was lost: the device once more */
     V.paused = on, V.hidden = 0;
     eng_pause(on);
     if (!V.level) /* the options' own pause says nothing */
         V.controls_until = now + CONTROLS_MS, V.disc_until = on ? now + DISC_MS : 0;
     if (on) place_save(now, 300);
+}
+
+/* Play/Pause, or a tap in the middle. On again while it plays without sound, the device is asked
+ * for once more: what the engine says of that is news again. */
+static void toggle(long long now) {
+    if (V.paused && V.s.silent && !V.s.lost) eng_output(), V.silent = 0, V.notice_until = 0;
+    pause_set(!V.paused, now);
 }
 
 /* The volume file, whole: a level for Q2 Pod to set, or "?" to be told it. */
@@ -532,7 +539,7 @@ static void key(const event_t *e, long long now) {
     if (k == K_PLAY && V.level)
         menu_close(now);
     else if (k == K_PLAY)
-        pause_set(!V.paused, now);
+        toggle(now);
     else if (k == K_CENTRE && V.level)
         menu_choose(now);
     else if (k == K_CENTRE) {                       /* seek mode on, or off with the place chosen */
@@ -588,7 +595,7 @@ static void tap(int x, int y, long long now) {
         options_open(now);
         break;
     case HIT_MIDDLE:
-        pause_set(!V.paused, now);
+        toggle(now);
         break;
     case HIT_BAR:
         break; /* the touch's down took it */
@@ -731,7 +738,9 @@ static void frame(long long now, int force) {
     o.menu = ready && V.level ? &V.menu : 0;
     if (!o.menu) { /* nothing shows through a menu */
         if (now < V.badge_until) o.badge = V.badge;
-        o.notice = V.s.lost ? "Sound output lost" : now < V.notice_until ? V.notice : 0;
+        o.notice = V.s.lost               ? "Sound output lost. Play/Pause: try again"
+                   : now < V.notice_until ? V.notice
+                                          : 0;
         o.subs = *V.subtext ? V.subtext : 0;
     }
     o.plain = !V.s.picture || V.state == ENG_FAILED || loading;

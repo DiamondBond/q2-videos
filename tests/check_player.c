@@ -1630,33 +1630,50 @@ static void run_faults(void) {
          "3500 key 171\n4500 shot c\n5000 key 170\n",
          0);
     CHECK(num("b", "lost") && num("b", "paused") && num("b", "pos") == num("b2", "pos"));
-    SAME(notice("b"), "Sound output lost");
+    SAME(notice("b"), "Sound output lost. Play/Pause: try again");
     CHECK(rgb("b", 131, 70) >> 16 < 0xa0 &&
           rgb("c", 131, 70) >> 16 > 0xc8); /* on the screen, over the yellow bar */
     CHECK(!num("c", "lost") && !num("c", "paused") && !num("c", "silent") &&
           num("c", "frames") > num("b", "frames") + RATE / 2);
     NEAR(num("c", "pos"), num("b", "pos") + 1000, 40), NEAR(num("c", "tone"), 880, 15);
     SAME(notice("c"), "");
-    /* still gone at Play: on without sound, by the clock */
+    /* still gone at Play: on without sound, by the clock. Every Play after a pause tries the
+     * output again: said again while it is gone, and heard again when it is back */
     play("lost-silent", "h264-aac.mp4",
-         "2000 sink lost\n2500 shot b\n3500 key 171\n4500 shot c\n6000 shot d\n6500 key 170\n", 0);
+         "2000 sink lost\n2500 shot b\n3500 key 171\n4500 shot c\n6000 shot d\n8000 key 171\n"
+         "8200 key 171\n8400 shot e\n8500 key 171\n8600 sink back\n8700 key 171\n9700 shot f\n"
+         "10000 key 170\n",
+         0);
     CHECK(num("c", "silent") && !num("c", "paused") && !num("c", "lost"));
     SAME(notice("c"), "Playing without sound");
     NEAR(num("c", "pos"), num("b", "pos") + 1000, 40);
     NEAR(num("d", "pos"), num("b", "pos") + 2500, 40);
     NEAR(num("d", "pic"), num("d", "pos"), 45);
+    CHECK(num("e", "silent") && !num("e", "paused"));
+    SAME(notice("e"), "Playing without sound");
+    CHECK(!num("f", "silent") && !num("f", "lost") && !num("f", "paused"));
+    NEAR(num("f", "pos"), num("e", "pos") + 1100, 40), SAME(notice("f"), "");
     /* an output that takes no more: three seconds on it is left behind and the video plays on
      * silent, to its end; the run ends well though a thread never comes back */
-    play("stall", "h264-aac.mp4", "2000 sink stall\n4500 shot held\n5500 shot c\n8000 shot d\n", 0);
+    play("stall", "h264-aac.mp4",
+         "2000 sink stall\n4500 shot held\n5500 shot c\n8000 shot d\n10000 key 171\n"
+         "10200 key 171\n10400 shot e\n",
+         0);
     CHECK(!num("held", "silent") && num("c", "silent") && num("d", "silent") &&
           says("end h264-aac.mp4 over"));
+    SAME(notice("d"), "Playing without sound"), SAME(notice("e"), "Playing without sound");
     NEAR(num("d", "pos"), num("c", "pos") + 2500, 40), NEAR(num("d", "pic"), num("d", "pos"), 45);
     CHECK(mark_of("h264-aac.mp4").flags == MARK_WATCHED);
     /* no output at all: silent from the start, and said */
-    play("gone", "h264-aac.mp4", "1000 shot a\n3000 shot b\n3500 key 170\n", "VIDEOS_SINK=gone");
+    play("gone", "h264-aac.mp4",
+         "1000 shot a\n3000 shot b\n3200 key 171\n3300 sink back\n3400 key 171\n4400 shot c\n"
+         "4500 key 170\n",
+         "VIDEOS_SINK=gone");
     CHECK(num("a", "silent") && num("a", "pos") == 1000 && num("b", "pos") == 3000 &&
           num("b", "pic") == 3000);
     SAME(notice("a"), "Playing without sound");
+    /* and there after a pause: the sound is back */
+    CHECK(!num("c", "silent")), SAME(notice("c"), "");
 }
 
 /* A Q2 awake for 14 hours: its clock's milliseconds times the 48 frames in each is past 32 bits,

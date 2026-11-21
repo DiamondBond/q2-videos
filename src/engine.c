@@ -1158,7 +1158,10 @@ static void *audio_main(void *arg) {
             a->pend_n = a->pend_at = a->fed = a->drained = 0, a->fmt = -1;
             continue;
         }
-        if (a->lost) { /* until the main thread asks for the output again */
+        /* The output is gone until the main thread asks for it again; asked of one that
+         * plays on without sound, the device is tried once more too. Patiently: whatever took
+         * it may be a moment letting go. */
+        if (a->lost || (E.retry && !a->device)) {
             if (!E.retry) {
                 wait_for(&a->w, 0);
                 continue;
@@ -1168,14 +1171,16 @@ static void *audio_main(void *arg) {
 #ifndef HOST
             if (*E.device) {
                 unlock();
-                ok = a->alsa = alsa_open(E.device, 0, &E.quit);
+                ok = a->alsa = alsa_open(E.device, 1, &E.quit);
                 lock();
             }
 #endif
-            a->device = ok, a->lost = 0, E.lost = 0, E.silent = !ok;
+            a->device = ok, a->lost = 0, a->written = 0, a->nw = 0;
+            E.lost = 0, E.silent = !ok;
             notify();
             continue;
         }
+        E.retry = 0; /* asked of one that plays: nothing to try */
         if (E.paused) {
             if (!a->held) hold(a);
             wait_for(&a->w, 0);
@@ -1432,7 +1437,8 @@ void eng_gain(int gain) { E.gain = gain; }
 
 void eng_output(void) {
     lock();
-    E.retry = 1;
+    /* not while a thread hangs in the device: it has it for good, and silent is how this stays */
+    if (!E.stuck) E.retry = 1, E.silent = 0;
     kick();
     unlock();
 }

@@ -237,7 +237,9 @@ void eng_audio(int nth);   /* another sound track, from about the place playing 
 void eng_subs(int stream); /* the file's own subtitles to decode, by stream; -1 none */
 void eng_fill(int on);
 void eng_gain(int gain);
-void eng_output(void); /* after lost: try the device once more, else play on silent */
+/* After lost, or playing on silent: the device is tried once more, as patiently as at the start;
+ * silent again (eng_poll says so) when it can't be had. */
+void eng_output(void);
 /* The file's own subtitles on show at ms (cues_at's answer; the texts are copied into buf). */
 int eng_cues(long long ms, char buf[][LINE_N], int max, long long *next);
 /* Ends it: every thread is told and waited for, a second at most. 0 when one did not come (it is
