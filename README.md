@@ -78,6 +78,7 @@ ffmpeg -i film.mkv -vf scale=-2:320 -c:v libx264 -crf 23 -c:a aac -b:a 128k film
 - **Large pictures** (1080p, most of all H.265 and 10-bit) may be more than the Q2 can decode in time. Videos then keeps the sound going and shows fewer pictures. A video that needs more memory than the Q2 has free isn't started, and says so.
 - A list of 49 rows or more is fetched once when it opens: thumbnails made while it is on the screen show the next time you open it.
 - A video whose thumbnail couldn't be made for a passing reason (too little memory free, a slow card) has the plain tile until Videos next starts, and is tried again then.
+- A `.ts` made of recordings joined end to end, each starting its clock again, has every time in it twice. Videos finds a place in it by how far into the file it is, so skips in it are approximate, and its length is learned as it plays.
 - Recently Added goes by the creation time the card's file system keeps; where there is none, by the file's own date, which a copied file brings with it.
 
 ## Files

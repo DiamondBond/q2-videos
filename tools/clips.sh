@@ -190,6 +190,10 @@ cat "$OUT/offset.ts" "$OUT/offset.ts" >"$OUT/jump.ts"
 ff -t 40 -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 40)" -c:v copy -c:a mp2 -ac 2 \
     -f mpegts "$T/part.ts"
 cat "$T/part.ts" "$T/part.ts" >"$OUT/twice.ts"
+# MPEG-2 with B-frames in a program stream: its first packets after a seek come out of order,
+# which is no such restart
+ff -f lavfi -i "$(pic 320x240 25 40)" -f lavfi -i "$(tone 440 48000 40)" -c:v mpeg2video -q:v 6 \
+    -bf 2 -g 15 -c:a mp2 -b:a 128k -ac 2 -f vob "$OUT/program.mpg"
 # And one that is small and then 1080p: a stream that grows on the way
 ff -t 3 -i "$T/long.mkv" -f lavfi -i "$(tone 440 48000 3)" -c:v copy -c:a mp2 -ac 2 \
     -f mpegts "$T/small.ts"

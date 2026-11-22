@@ -1691,11 +1691,11 @@ static void run_refused(void) {
     play("fits-10", "tenbit.mkv", "500 shot a\n600 key 170\n", "VIDEOS_MEM_KB=69000");
     CHECK(num("a", "state") == ENG_READY && num("a", "pic") >= 0);
     /* a stream that is small and then large is weighed again where it grows: it stops there
-     * and says so, the place saved */
+     * and says so, the mark written (five seconds long, all of it is the end's half minute) */
     play("grow", "grow.ts", "2000 shot a\n4000 shot b\n", "VIDEOS_MEM_KB=30000");
     CHECK(num("a", "state") == ENG_READY && num("a", "pic") > 1900 &&
           num("b", "state") == ENG_FAILED);
-    CHECK(says("save pos=0 watched=0\nfail 1920 × 1080 is too large for the Q2's memory.") &&
+    CHECK(says("save pos=0 watched=1\nfail 1920 × 1080 is too large for the Q2's memory.") &&
           says("end grow.ts quit"));
     play("grow-fits", "grow.ts", "2000 shot a\n4000 shot b\n", "VIDEOS_MEM_KB=40000");
     CHECK(num("b", "state") == ENG_READY && num("b", "pic") > 3900 && says("end grow.ts over"));
@@ -1848,6 +1848,7 @@ static void run_spliced(void) {
          "49000 shot d\n49200 key 222\n50000 shot e\n50100 key 170\n",
          0);
     CHECK(says("ready dur=40210") && num("a", "pos") == 30000 && num("b", "pos") == 45000);
+    CHECK(!num("a", "spliced") && num("b", "spliced")); /* known once it is read past */
     NEAR(num("b", "dur"), 80420, 1500), NEAR(num("b", "pic"), 44980, 60);
     /* on ten seconds, to the keyframe after it at the latest (they are two seconds apart) */
     CHECK(num("c", "pos") >= 56900 && num("c", "pos") <= 59200);
@@ -1862,6 +1863,15 @@ static void run_spliced(void) {
     CHECK(num("a", "pos") >= k.pos_ms + 900 && num("a", "pos") <= k.pos_ms + 3200);
     NEAR(num("a", "pic"), num("a", "pos"), 60), NEAR(num("a", "tone"), 880, 15);
     CHECK(says("end twice.ts over") && mark_of("twice.ts").flags == MARK_WATCHED);
+}
+
+/* A program stream's first packets after a seek come a fifth of a second out of order (its
+ * B-frames): no splice, so every seek in it stays by time. */
+static void run_program(void) {
+    videos("program.mpg");
+    play("program", "program.mpg",
+         "1000 key 223\n3000 key 223\n5000 key 223\n7000 key 222\n8000 shot a\n8100 key 170\n", 0);
+    CHECK(!num("a", "spliced") && num("a", "pos") > 15000 && num("a", "tone") > 860);
 }
 
 /* The engine's first word is not lost: a file that fails before the main thread has waited even
@@ -2096,6 +2106,7 @@ int main(int argc, char **argv) {
     run_awake(0);
     run_files();
     run_spliced();
+    run_program();
     run_behind();
     run_term();
     run_lock();

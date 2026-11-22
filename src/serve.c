@@ -143,7 +143,7 @@ static struct {
 } art[COVERS];
 static int arts;
 static char shown[REL_MAX + 1]; /* the level they are of, and the row its COVERS rows start at */
-static int shown_off;
+static int shown_off, shown_sort;
 
 static const char *art_file(const char *name, char *path) {
     snprintf(path, PATH_N, "%s/q2-videos.art/%s", tmp_dir, name);
@@ -369,12 +369,13 @@ static void level(rep_t *r, const char *rel, int off) {
     if (n == first) item[n++].type = I_NONE;
     if (top) item[n++].type = I_SETTINGS;
 
-    /* Another level than the one shown last, or its rows from another COVERS on (More…, or Back
-     * from there): the art folder is this one's now. Q2 Pod has let the other's rows go before
-     * it asks; Settings, which has no covers, leaves the folder be. */
-    if (arty && off % COVERS == 0 && (strcmp(rel, shown) || off != shown_off || arts == COVERS)) {
+    /* Another level than the one shown last, its rows from another COVERS on (More…, or Back
+     * from there) or in another order: the art folder is this one's now. Q2 Pod has let the other's
+     * rows go before it asks; Settings, which has no covers, leaves the folder be. */
+    if (arty && off % COVERS == 0 &&
+        (strcmp(rel, shown) || off != shown_off || set.sort != shown_sort || arts == COVERS)) {
         art_clear();
-        snprintf(shown, sizeof shown, "%s", rel), shown_off = off;
+        snprintf(shown, sizeof shown, "%s", rel), shown_off = off, shown_sort = set.sort;
     }
 
     for (int i = off; i < n; ++i, ++sent) {

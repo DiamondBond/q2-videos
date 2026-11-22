@@ -216,6 +216,7 @@ typedef struct {
     int tone;         /* their last tenth of a second's zero crossings, times ten: 2 x Hz */
     int level;        /* the ladder's */
     long long queued; /* bytes of packets read and waiting to be decoded */
+    int spliced;      /* its timestamps have started again: seeks go by bytes */
 } snap_t;
 
 /* Starts playing the video at path from start_ms: its threads begin, and eng_poll says when it

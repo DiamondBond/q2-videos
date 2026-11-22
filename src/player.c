@@ -849,12 +849,12 @@ static void frame(long long now, int force) {
             "told=%d menu=%d sel=%d "
             "sub=%d audio=%d fill=%d geom=%d,%d,%d,%d frames=%lld tone=%d level=%d lost=%d "
             "silent=%d dim=%d badge=%d disc=%d target=%d "
-            "serial=%d gain=%d queued=%lld battery=%d rows=%s| notice=%s| text=%s",
+            "serial=%d gain=%d queued=%lld spliced=%d battery=%d rows=%s| notice=%s| text=%s",
             V.shot, now, V.state, o.pos_ms, o.dur_ms, V.s.pic_ms, V.paused, o.controls, o.knob,
             o.volume, P.told, V.level, V.menu.sel, V.sub, V.audio, P.set.fill, V.s.geom.vx,
             V.s.geom.vy, V.s.geom.vw, V.s.geom.vh, V.s.frames, V.s.tone, V.s.level, V.s.lost,
             V.s.silent, P.dim, o.badge, o.disc, o.target, V.s.serial, P.gain, V.s.queued,
-            o.controls ? o.battery : -1, rows, o.notice ? o.notice : "", text);
+            V.s.spliced, o.controls ? o.battery : -1, rows, o.notice ? o.notice : "", text);
         V.shot = 0;
     }
 }
@@ -1056,8 +1056,10 @@ int player_main(int argc, char **argv) {
                       lib_next(P.root, V.rel, P.set.sort, next, sizeof next);
          ++nth) {}
     if (!P.stuck) let_go();
-    if (unsaved) save(0, 1200); /* a setting no save has taken along */
-    save_done(1200);            /* the place reaches the card before the screen is given back */
+    /* a setting no save has taken along, and the place, reach the card before the screen is
+     * given back; under Q2 Pod's TERM all of it within the three seconds that leaves */
+    if (unsaved) save(0, term ? 600 : 1200);
+    save_done(term ? 600 : 1200);
     leave();
     if (P.stuck || !save_done(0)) _exit(0); /* a thread is still in the card's or ALSA's hands */
     cues_free(&V.cues);

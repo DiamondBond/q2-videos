@@ -576,15 +576,18 @@ static void subtitle(AVCodecContext *dec, const AVStream *st, AVPacket *pkt, int
  * jumped, as ffmpeg's own tools do, so the decoders and the clock see one run of time. A jump is
  * ten seconds on, or a tenth back, from where the stream's next packet should be (*next); *off
  * is what has been added so far. A time can then be in the file twice, so a seek in one that
- * has jumped goes by bytes (reader_main), and the first packet read after it is at the place
- * asked for (*place, NONE otherwise). */
+ * has jumped ten seconds on or a whole one back goes by bytes (reader_main), and the first
+ * packet read after it is at the place asked for (*place, NONE otherwise). */
 static void joined(AVPacket *pkt, AVRational tb, long long *next, long long *off,
                    long long *place) {
     if (next && pkt->dts != AV_NOPTS_VALUE) {
         long long at = av_rescale_q(pkt->dts, tb, AV_TIME_BASE_Q), by;
         if (*place != NONE) *off = *place - at, *place = NONE;
         at += *off, by = at - *next;
-        if (*next != NONE && (by > E.jump_us || by < -100000)) *off -= by, at -= by, E.spliced = 1;
+        /* moved either way, but a splice only when no reordering could do it: a program
+         * stream's first packets after a seek come a fifth of a second out of order */
+        if (*next != NONE && (by > E.jump_us || by < -100000))
+            *off -= by, at -= by, E.spliced |= by > E.jump_us || by < -1000000;
         *next = at + av_rescale_q(pkt->duration, tb, AV_TIME_BASE_Q);
     }
     long long add = av_rescale_q(*off, AV_TIME_BASE_Q, tb);
@@ -601,6 +604,7 @@ static void *reader_main(void *unused) {
     int upto = 0;                         /* and it goes no further than its own */
     long long off = 0, vnext = NONE, anext = NONE, place = NONE; /* joined()'s */
     long long read_ms = 0; /* how far into the video the packets read reach */
+    int longer = 0;        /* it has gone on past the length it gave */
     int ok = pkt && media_open();
     lock();
     E.state = ok ? ENG_READY : ENG_FAILED;
@@ -684,7 +688,7 @@ static void *reader_main(void *unused) {
         lock();
         if (r == AVERROR(EAGAIN)) continue;
         if (r < 0) { /* the end, or a tail that can't be read: the same */
-            if (E.dur_ms && read_ms > E.dur_ms) E.dur_ms = read_ms; /* and now it is known */
+            if (E.dur_ms && (longer || read_ms > E.dur_ms)) E.dur_ms = read_ms; /* now known */
             E.eof = 1;
             if (E.vi >= 0) pq_put(&E.vq, 0, serial, 0);
             if (E.ai >= 0) pq_put(&E.aq, 0, serial, 0);
@@ -702,13 +706,16 @@ static void *reader_main(void *unused) {
             pkt->dts != AV_NOPTS_VALUE) {
             long long t =
                 (av_rescale_q(pkt->dts + pkt->duration, tb, AV_TIME_BASE_Q) - E.start_us) / 1000;
-            if (t > read_ms) read_ms = t;
+            int further = t > read_ms;
+            if (further) read_ms = t;
             /* A file that goes on past the length it gave (a recording added to another) is
              * longer than it says: by as much as it has still to be read, if its bytes come as
-             * evenly as they have so far; at the least, as long as what was read. */
-            if (E.dur_ms && t > E.dur_ms) {
-                long long all = pkt->pos > 0 && E.size ? av_rescale(t, E.size, pkt->pos) : t;
-                E.dur_ms = all > t ? all : t;
+             * evenly as they have so far; at the least, as long as what was read. Guessed again
+             * with all that is read further in, so a first guess far out comes right. */
+            if (E.dur_ms && (t > E.dur_ms || (longer && further))) {
+                /* a packet that doesn't say where it lies in the file guesses nothing */
+                long long all = pkt->pos > 0 && E.size ? av_rescale(t, E.size, pkt->pos) : E.dur_ms;
+                E.dur_ms = all > t ? all : t, longer = 1;
             }
         }
         if (pkt->stream_index == E.vi) {
@@ -789,6 +796,11 @@ static void *video_main(void *unused) {
             serial = n->serial, first = 1, count = 0, last = NONE, lad.late = 0;
         } else if (cut) /* what was queued before it was dropped (shed) */
             avcodec_flush_buffers(E.vdec), last = NONE;
+        /* the keyframe it was skipping to goes in: from it on as the level below. Its picture
+         * comes out some packets later in a stream that reorders, and until then every packet
+         * would be passed over. */
+        if (lad.level == 3 && n->pkt && n->pkt->flags & AV_PKT_FLAG_KEY)
+            lad.level = 2, lad.ahead_since = now_ms();
         E.vdec->skip_loop_filter = lad.level >= 1 ? AVDISCARD_ALL : AVDISCARD_DEFAULT;
         E.vdec->skip_frame = lad.level >= 3   ? AVDISCARD_NONKEY
                              : lad.level == 2 ? AVDISCARD_NONREF
@@ -1338,7 +1350,8 @@ void eng_poll(snap_t *s, pix **cur) {
     E.notify = 0;
     /* An output that has held one write for three seconds takes no sound: its thread is left
      * in it for good, and another plays on from here into the silent one. */
-    if (a && a->write_at && (int)((unsigned)now - a->write_at) >= STALL_MS && !a->abandoned) {
+    unsigned write_at = a ? a->write_at : 0; /* once: its thread clears it as a write returns */
+    if (write_at && (int)((unsigned)now - write_at) >= STALL_MS && !a->abandoned) {
         int ok = clock_read(now, &c);
         a->abandoned = 1, a->w.on = 0;
         E.stuck = E.silent = 1;
@@ -1383,7 +1396,7 @@ void eng_poll(snap_t *s, pix **cur) {
     s->pic_ms = shown ? (E.shown_us - E.start_us) / 1000 : -1;
     s->state = E.state, s->picture = E.picture, s->serial = E.serial, s->geom = E.geom;
     s->lost = E.lost, s->silent = E.silent, s->frames = E.frames, s->tone = E.tone;
-    s->level = E.level, s->queued = E.vq.bytes + E.aq.bytes;
+    s->level = E.level, s->queued = E.vq.bytes + E.aq.bytes, s->spliced = E.spliced;
     /* the end: nothing left to read, decode, show or hear */
     s->ended = E.state == ENG_READY && E.eof && E.vdone && E.adone && !E.count && !E.seek.pending &&
                E.rserial == E.serial && ok && (E.aend_us == NONE || c >= E.aend_us) &&
