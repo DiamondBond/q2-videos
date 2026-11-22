@@ -3,7 +3,8 @@
 
 Three 128 x 128 pictures, which Q2 Pod shows 64 px square beside a row: a folder's, Settings' and
 the one a video gets when no picture of it can be made. Folder and no-picture are JPEGs, a white
-glyph on a mid-grey tile; Settings' is a bare white gear on transparent, a PNG (Q2 Pod reads a
+glyph on a mid-grey tile; Settings' is a bare mid-grey gear on transparent (white would vanish on a light list; covers get
+no Light Mode ink), a PNG (Q2 Pod reads a
 cover by what it holds, not its name; a JPEG has no transparency). Flat: no gradient or gloss.
 Each is drawn eight times the size and scaled down, for smooth edges, and JPEGs are
 saved without chroma subsampling, which would blur a glyph's edge at this size. Needs Pillow.
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw
 
 PX, UP = 128, 8
 TILE, GLYPH = "#7C7C80", "#FFFFFF"
+GEAR = "#8E8E93"  # Settings' gear: a mid-grey, which reads on a light list and a dark one
 
 
 def canvas():
@@ -36,7 +38,7 @@ def folder():
 
 
 def settings():
-    """A white gear on transparent: PNG data, which Q2 Pod's cover reader takes by what the file
+    """A mid-grey gear on transparent: PNG data, which Q2 Pod's cover reader takes by what the file
     holds, not its name (a JPEG has no transparency)."""
     mask = Image.new("L", (PX * UP, PX * UP), 0)
     draw = ImageDraw.Draw(mask)
@@ -49,7 +51,7 @@ def settings():
     for radius, fill in ((30, 255), (12, 0)):  # the wheel, and its hole
         draw.ellipse([cx - radius * UP, cy - radius * UP, cx + radius * UP, cy + radius * UP],
                      fill=fill)
-    image = Image.new("RGBA", mask.size, GLYPH)
+    image = Image.new("RGBA", mask.size, GEAR)
     image.putalpha(mask)
     return image
 
