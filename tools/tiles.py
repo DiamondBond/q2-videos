@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The rows' static covers: tools/tiles.py [DIR], DIR by default assets/ beside this folder.
 
-Three 128 x 128 JPEGs, which Q2 Pod shows 64 px square beside a row: a folder's, Settings' and
-the one a video gets when no picture of it can be made. Flat: a white glyph on a mid-grey tile,
-which sits in a Light Mode list as well as a dark one (a dark tile is a black square there); no
-gradient or gloss. Each is drawn eight times the size and scaled down, for smooth edges, and
+Three 128 x 128 pictures, which Q2 Pod shows 64 px square beside a row: a folder's, Settings' and
+the one a video gets when no picture of it can be made. Folder and no-picture are JPEGs, a white
+glyph on a mid-grey tile; Settings' is a bare white gear on transparent, a PNG (Q2 Pod reads a
+cover by what it holds, not its name; a JPEG has no transparency). Flat: no gradient or gloss.
+Each is drawn eight times the size and scaled down, for smooth edges, and JPEGs are
 saved without chroma subsampling, which would blur a glyph's edge at this size. Needs Pillow.
 """
 import math
@@ -35,16 +36,21 @@ def folder():
 
 
 def settings():
-    image, draw = canvas()
+    """A white gear on transparent: PNG data, which Q2 Pod's cover reader takes by what the file
+    holds, not its name (a JPEG has no transparency)."""
+    mask = Image.new("L", (PX * UP, PX * UP), 0)
+    draw = ImageDraw.Draw(mask)
     cx = cy = PX / 2 * UP
     for tooth in range(8):  # each a wedge from the hub's rim out to the tip
         a = tooth * math.pi / 4
         points = [(27, -0.25), (40, -0.16), (40, 0.16), (27, 0.25)]
         draw.polygon([(cx + r * UP * math.cos(a + da), cy + r * UP * math.sin(a + da))
-                      for r, da in points], fill=GLYPH)
-    for radius, fill in ((30, GLYPH), (12, TILE)):  # the wheel, and its hole
+                      for r, da in points], fill=255)
+    for radius, fill in ((30, 255), (12, 0)):  # the wheel, and its hole
         draw.ellipse([cx - radius * UP, cy - radius * UP, cx + radius * UP, cy + radius * UP],
                      fill=fill)
+    image = Image.new("RGBA", mask.size, GLYPH)
+    image.putalpha(mask)
     return image
 
 
@@ -63,7 +69,11 @@ def main():
     os.makedirs(out, exist_ok=True)
     for name, glyph in (("folder", folder), ("settings", settings), ("nopicture", nopicture)):
         tile = glyph().resize((PX, PX), Image.LANCZOS)
-        tile.save(os.path.join(out, "tile-%s.jpg" % name), quality=92, subsampling=0, optimize=True)
+        path = os.path.join(out, "tile-%s.jpg" % name)
+        if tile.mode == "RGBA":
+            tile.save(path, format="PNG", optimize=True)
+        else:
+            tile.save(path, quality=92, subsampling=0, optimize=True)
 
 
 if __name__ == "__main__":
