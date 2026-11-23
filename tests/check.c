@@ -373,6 +373,25 @@ static void check_library(void) {
     CHECK(lib_all(root, &l) && l.n == 9 && strlen(l.v[4].name) == REL_MAX);
     lib_free(&l);
 
+    /* a folder's own picture: the first of Q2 Pod's names in it, case aside; lib_all has it after
+     * the videos it sorts among, but the top's, and none of a folder without a video (no row) */
+    file(V "Series/Folder.JPG", 7, 5000), file(V "Series/COVER.png", 8, 0);
+    file(V "Movies/folder.webp", 9, 0), file(V "cover.jpg", 1, 0), file(V "Docs/cover.jpg", 1, 0);
+    CHECK(lib_cover(root, "Series") == cache_key("Series/Folder.JPG", 7, 5000));
+    CHECK(lib_cover(root, "Movies") == cache_key("Movies/folder.webp", 9, 0));
+    CHECK(!lib_cover(root, "Deep") && !lib_cover(root, "") && !lib_cover(root, "../Other"));
+    CHECK(lib_list(root, "Series", SORT_NAME, &l) && l.n == 2 && l.dirs == 2); /* no row */
+    lib_free(&l);
+    CHECK(lib_all(root, &l) && l.n == 11);
+    int pics = 0;
+    for (int i = 0; i < l.n; ++i)
+        pics += (!strcmp(l.v[i].name, "Series/Folder.JPG") && l.v[i].size == 7) ||
+                !strcmp(l.v[i].name, "Movies/folder.webp");
+    CHECK(pics == 2);
+    lib_free(&l);
+    sh("rm '" V "Series/Folder.JPG' '" V "Series/COVER.png' '" V "Movies/folder.webp' '" V
+       "cover.jpg' '" V "Docs/cover.jpg'");
+
     /* Continue Watching: the unfinished video played last that is still there */
     CHECK(!lib_continue(root, &m));
     marks_put(&m, "Episode 1.MP4", 30)->pos_ms = 5000;

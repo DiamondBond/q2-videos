@@ -270,8 +270,12 @@ int thumb_make(const char *path, int ms, thumb_t *t, unsigned char *jpg, size_t 
         if (getenv("VIDEOS_MEM_KB")) avail = (unsigned)atoi(getenv("VIDEOS_MEM_KB"));
 #endif
         /* its frames would not fit in what is free now (the player's own rule; the Q2 has no
-         * memory to swap to): none for now */
-        if (t->w && codec && too_large(t->w, t->h, pix_bits(par->format), avail))
+         * memory to swap to): none for now. A folder's picture is one frame, not a decoder's
+         * ten: counted as three, for a progressive JPEG's coefficients beside it.
+         * ponytail: three is a guess; fewer if a cover that fits is refused, more if the worker
+         * is killed on one. */
+        if (t->w && codec &&
+            too_large(t->w, is_video(path) ? t->h : t->h * 3 / 10, pix_bits(par->format), avail))
             t->state = T_LATER;
         else if (t->w && codec && (c = avcodec_alloc_context3(codec)) &&
                  avcodec_parameters_to_context(c, par) >= 0) {
@@ -436,8 +440,12 @@ int worker_pass(char *level, int in, int out) {
         if (snprintf(rel, sizeof rel, "%s%s%s", was, *was ? "/" : "", here.v[i].name) <
             (int)sizeof rel)
             r = one(root, rel, &here.v[i], level, in, out) < 0 ? -1 : strcmp(level, was) != 0;
-    for (int i = 0; !r && i < all.n; ++i)
-        r = one(root, all.v[i].name, &all.v[i], level, in, out) < 0 ? -1 : strcmp(level, was) != 0;
+    for (int video = 0; video < 2; ++video) /* the folders' pictures, each quick, then the videos */
+        for (int i = 0; !r && i < all.n; ++i)
+            if (is_video(all.v[i].name) == video)
+                r = one(root, all.v[i].name, &all.v[i], level, in, out) < 0
+                        ? -1
+                        : strcmp(level, was) != 0;
     lib_free(&here), lib_free(&all);
     return r;
 }

@@ -18,7 +18,7 @@ Videos
 
 Centre plays a video from where you left it. A video you stopped part-way says how much is left; one played to its end says **Watched** and starts from the beginning next time. Hold **Play/Pause** on a video to mark it watched, or unwatched again.
 
-Thumbnails are made in the background the first time Videos sees a video, while no video plays, and kept on the card. A video the Q2 can't decode has a plain tile.
+Thumbnails are made in the background the first time Videos sees a video, while no video plays, and kept on the card. A video the Q2 can't decode has a plain tile. A folder shows its own picture when it has one, as Q2 Pod's folders do: `cover.jpg` or `folder.jpg` (or `.png`, `.webp`), any case; until it is made, and without one, the folder tile.
 
 ## Playing
 

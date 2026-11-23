@@ -179,10 +179,12 @@ static int cover(unsigned key, int of, unsigned long long thumb) {
         thumb_file(thumb, from);
     else if (of)
         snprintf(from, sizeof from, "%s/%s", state_dir, TILE[of]);
-    /* a JPEG of a cover's size and nothing else: the card's files are not ours alone */
+    /* a JPEG or a PNG (the Settings tile's gear is on transparent) of a cover's size and nothing
+     * else, as Q2 Pod takes: the card's files are not ours alone */
     if (of && i < COVERS && !stat(from, &st) && S_ISREG(st.st_mode) && st.st_size <= THUMB_BYTES)
         jpg = (unsigned char *)file_get(from, &n);
-    int ok = jpg && n > 3 && n <= THUMB_BYTES && jpg[0] == 0xff && jpg[1] == 0xd8 &&
+    int ok = jpg && n > 3 && n <= THUMB_BYTES &&
+             ((jpg[0] == 0xff && jpg[1] == 0xd8) || !memcmp(jpg, "\x89PNG", 4)) &&
              file_put(path, jpg, n);
     free(jpg);
     if (ok) {
@@ -395,6 +397,12 @@ static void level(rep_t *r, const char *rel, int off) {
             snprintf(text, sizeof text, "%d video%s", e->count, e->count == 1 ? "" : "s");
             ok = row(r, "list", "dir", e->name, text, ctx, ""), of = C_FOLDER,
             key = art_key("dir", ctx);
+            /* its own picture, once the worker has made it a cover; the folder tile till then */
+            unsigned long long pic = lib_cover(root, ctx);
+            if (pic && !(t = index_find(pic)))
+                missing = 1;
+            else if (t && t->state == T_PICTURE)
+                of = C_THUMB;
         } else { /* a video: held Play/Pause marks it watched, or not */
             int again = it->type == I_CONTINUE;
             if (again)

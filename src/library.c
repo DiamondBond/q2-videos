@@ -132,8 +132,38 @@ static int kind(char *p, size_t len, size_t from, const struct dirent *e, struct
     return 'v';
 }
 
+/* A folder's own picture, as Q2 Pod's folders have theirs: the first of these there, case aside. */
+static const char *const COVER[] = { "cover.jpg",  "folder.jpg", "cover.png",
+                                     "folder.png", "cover.webp", "folder.webp" };
+#define COVER_N (int)(sizeof COVER / sizeof *COVER)
+
+static int cover_rank(const char *name) {
+    int i = 0;
+    while (i < COVER_N && strcasecmp(name, COVER[i])) ++i;
+    return i;
+}
+
+/* The folder p[0..len)'s picture: its path left in p (a row's from p + from), its stat in st. 0
+ * when it has none that is a file, or its path is over REL_MAX. */
+static int cover_of(char *p, size_t len, size_t from, struct stat *st) {
+    char best[16];
+    int rank = COVER_N;
+    struct dirent *e;
+    p[len] = 0;
+    DIR *d = opendir(p);
+    while (d && (e = readdir(d)))
+        if (cover_rank(e->d_name) < rank) rank = cover_rank(e->d_name), strcpy(best, e->d_name);
+    if (d) closedir(d);
+    if (rank == COVER_N || len + 1 + strlen(best) >= PATH_N ||
+        len + 1 + strlen(best) - from > REL_MAX)
+        return 0;
+    p[len] = '/', strcpy(p + len + 1, best);
+    return !stat(p, st) && S_ISREG(st->st_mode);
+}
+
 /* The videos under the folder p[0..len), through its subfolders; each is added to all, by its
- * path from p + from, when all is given. */
+ * path from p + from, when all is given, and so is each folder's picture (cover_of) but the top's,
+ * for the worker to make its row's cover. */
 static int walk(char *p, size_t len, size_t from, listing_t *all) {
     struct dirent *e;
     struct stat st;
@@ -148,6 +178,7 @@ static int walk(char *p, size_t len, size_t from, listing_t *all) {
             ++count;
     }
     if (d) closedir(d);
+    if (all && count && len >= from && cover_of(p, len, from, &st)) add(all, p + from, 0, 0, &st);
     return count;
 }
 
@@ -209,6 +240,14 @@ int lib_all(const char *root, listing_t *l) {
     walk(p, strlen(p), strlen(p) + 1, l);
     if (l->n) qsort(l->v, (size_t)l->n, sizeof *l->v, by_name);
     return 1;
+}
+
+unsigned long long lib_cover(const char *root, const char *rel) {
+    char p[PATH_N];
+    struct stat st;
+    if (!*rel || !lib_path(root, rel, p, sizeof p)) return 0;
+    size_t from = strlen(root) + 1;
+    return cover_of(p, strlen(p), from, &st) ? cache_key(p + from, st.st_size, st.st_mtime) : 0;
 }
 
 int lib_next(const char *root, const char *rel, int sort, char *out, size_t n) {

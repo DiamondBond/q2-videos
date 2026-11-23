@@ -106,6 +106,20 @@ long long mono_ms(void) {
     return t.tv_sec * 1000ll + t.tv_nsec / 1000000;
 }
 
+/* A folder's picture (lib_all's) by its first bytes, as libavformat calls the one reader of it,
+ * else 0: by its name alone FFmpeg takes it for a numbered sequence, and a .png named .jpg is read
+ * all the same. */
+static const char *picture_format(const char *path) {
+    unsigned char b[12];
+    int fd = is_video(path) ? -1 : open(path, O_RDONLY);
+    ssize_t n = fd < 0 ? 0 : read(fd, b, sizeof b);
+    if (fd >= 0) close(fd);
+    if (n != (ssize_t)sizeof b) return 0;
+    if (b[0] == 0xff && b[1] == 0xd8) return "jpeg_pipe";
+    if (!memcmp(b, "\x89PNG", 4)) return "png_pipe";
+    return !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WEBP", 4) ? "webp_pipe" : 0;
+}
+
 AVFormatContext *input_open(const char *path, int (*stop)(void *), void *arg, int *err) {
     char url[PATH_N + 8];
     AVDictionary *opts = 0;
@@ -118,9 +132,11 @@ AVFormatContext *input_open(const char *path, int (*stop)(void *), void *arg, in
          * can show the second line missing: none of FFmpeg 4.2's readers named opens another
          * resource by itself (mov's external tracks are off by default). It stays for one that
          * would. */
-        av_dict_set(&opts, "format_whitelist", FORMATS, 0);
+        const char *pic = picture_format(path);
+        av_dict_set(&opts, "format_whitelist", pic ? pic : FORMATS, 0);
         av_dict_set(&opts, "protocol_whitelist", "file", 0);
-        if ((r = avformat_open_input(&ic, url, 0, &opts)) < 0) ic = 0; /* a failed open freed it */
+        if ((r = avformat_open_input(&ic, url, pic ? av_find_input_format(pic) : 0, &opts)) < 0)
+            ic = 0; /* a failed open freed it */
         av_dict_free(&opts);
     }
     if (err) *err = r;

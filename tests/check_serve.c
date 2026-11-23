@@ -193,13 +193,17 @@ static int art_count(void) {
 /* ---- A JPEG, looked at --------------------------------------------------------------------- */
 
 static unsigned be16(const unsigned char *p) { return p[0] << 8 | p[1]; }
-/* Q2 Pod's own look at a cover (patch/coverflow.c picture_size): its size from the frame header
- * among its first 64 segments. 0 when it finds none: no cover for Q2 Pod. */
+/* Q2 Pod's own look at a cover (patch/coverflow.c picture_size): a PNG's size from its header, a
+ * JPEG's from the frame header among its first 64 segments. 0 when it finds none: no cover for
+ * Q2 Pod. */
 static int picture_size(const char *path, int *w, int *h) {
     unsigned char b[24];
     FILE *f = fopen(path, "rb");
     int got = f && fread(b, 1, sizeof b, f) == sizeof b, kind = 0;
-    if (got && b[0] == 0xff && b[1] == 0xd8)
+    if (got && b[0] == 0x89 && b[1] == 'P' && !memcmp(b + 12, "IHDR", 4))
+        kind = 1, *w = be16(b + 16) ? 65536 : (int)be16(b + 18),
+        *h = be16(b + 20) ? 65536 : (int)be16(b + 22);
+    else if (got && b[0] == 0xff && b[1] == 0xd8)
         for (long at = 2, n = 0;
              n < 64 && !fseek(f, at, 0) && fread(b, 1, 9, f) == 9 && b[0] == 0xff && b[1] != 0xda;
              ++n, at += b[1] == 0xff ? 1 : 2 + be16(b + 2))
@@ -876,8 +880,9 @@ static void check_covers(void) {
     CHECK(same_file(art_path("dir", "Movies"), "assets/tile-folder.jpg") &&
           same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
     CHECK(same_file(art_path("settings", ""), "assets/tile-settings.jpg"));
-    cover_ok(art_path("dir", "Series"), &k), cover_ok(art_path("settings", ""), &k);
-    CHECK(k.luma > 130 && k.luma < 175); /* a white glyph on a mid-grey tile */
+    cover_ok(art_path("dir", "Series"), &k);
+    int w = 0, h = 0; /* Settings' is a PNG, its gear on transparent: Q2 Pod sizes one too */
+    CHECK(picture_size(art_path("settings", ""), &w, &h) && w == THUMB_PX && h == THUMB_PX);
     CHECK(access(art_path("play", "h264-aac.mp4"), 0) &&
           access(art_path("play", "Episode 1.MP4"), 0));
     SAME(ROW(6, CTX), "h264-aac.mp4"), SAME(ROW(6, SUB), "");
@@ -1075,6 +1080,41 @@ static void check_covers(void) {
           !index_find(key_of(CARD "/Videos", "later.mp4")));
     unlink(V "late.mp4"), unlink(V "later.mp4");
     close(to[0]), close(from[0]), close(from[1]);
+
+    /* A folder's own picture is its row's cover once the worker has made it one, as it makes a
+     * video's: Folder.JPG, case aside, before COVER.png, and a PNG named cover.jpg read as what
+     * it is. The folder tile until then, and again once the picture is gone. */
+    sh("cp assets/tile-folder.jpg " V "Series/Folder.JPG && cp assets/tile-settings.jpg " V
+       "Series/COVER.png && cp assets/tile-settings.jpg '" V "Series/Season 1/cover.jpg'");
+    unsigned long long folder = key_of(CARD "/Videos", "Series/Folder.JPG"),
+                       season = key_of(CARD "/Videos", "Series/Season 1/cover.jpg");
+    CHECK(ask("menu") > 0 && same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
+    CHECK(worker_pass(level, -1, -1) == 0);
+    CHECK((t = index_find(folder)) && t->state == T_PICTURE && (t = index_find(season)) &&
+          t->state == T_PICTURE && !index_find(key_of(CARD "/Videos", "Series/COVER.png")));
+    CHECK(ask("menu") > 0 && same_file(art_path("dir", "Series"), thumb_file(folder, path)) &&
+          !same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
+    cover_ok(art_path("dir", "Series"), &k);
+    CHECK(ask("dir\tSeries") > 0 &&
+          same_file(art_path("dir", "Series/Season 1"), thumb_file(season, path)));
+    cover_ok(art_path("dir", "Series/Season 1"), &k);
+    unlink(V "Series/Folder.JPG"); /* COVER.png's turn */
+    CHECK(ask("menu") > 0 && same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
+    CHECK(worker_pass(level, -1, -1) == 0 && access(thumb_file(folder, path), 0));
+    CHECK(ask("menu") > 0 &&
+          same_file(art_path("dir", "Series"),
+                    thumb_file(key_of(CARD "/Videos", "Series/COVER.png"), path)));
+    sh("rm " V "Series/COVER.png '" V "Series/Season 1/cover.jpg'");
+    CHECK(worker_pass(level, -1, -1) == 0 && access(thumb_file(season, path), 0));
+    CHECK(ask("menu") > 0 && same_file(art_path("dir", "Series"), "assets/tile-folder.jpg"));
+    /* a big picture with 20 MB free: one frame, not a video's ten, so it is made */
+    sh("'%s' -v error -y -f lavfi -i color=blue:size=2000x2000 -frames:v 1 " V "Movies/cover.jpg",
+       ffmpeg);
+    setenv("VIDEOS_MEM_KB", "20000", 1);
+    CHECK(worker_pass(level, -1, -1) == 0);
+    unsetenv("VIDEOS_MEM_KB");
+    CHECK((t = index_find(key_of(CARD "/Videos", "Movies/cover.jpg"))) && t->state == T_PICTURE);
+    unlink(V "Movies/cover.jpg");
     index_free();
 }
 
@@ -1374,6 +1414,24 @@ static void check_server(char **cmd, int host) {
     for (long long end = now_ms() + 2000; !dead(orphan); nap(20))
         if (now_ms() >= end) kill(orphan, SIGKILL), CHECK(!"a worker left behind");
     unlink(ECARD "/Videos/orphan.mp4");
+
+    /* A folder's own picture, read by this build's FFmpeg (the Q2's under qemu-check): Series'
+     * row has it for its cover once the worker has made it, a PNG named folder.jpg, then a JPEG
+     * cover.jpg, which comes first */
+    char pic[2][PATH_N];
+    sh("cp assets/tile-settings.jpg " ECARD "/Videos/Series/folder.jpg");
+    start(cmd, 0);
+    for (int i = 0; i < 2; ++i) {
+        if (i) sh("cp assets/tile-folder.jpg " ECARD "/Videos/Series/cover.jpg");
+        snprintf(pic[i], PATH_N, ECARD "/.videos/cache/%016llx.jpg",
+                 key_of(ECARD "/Videos", i ? "Series/cover.jpg" : "Series/folder.jpg"));
+        for (long long end = now_ms() + 60000; !same_file(art_path("dir", "Series"), pic[i]);
+             nap(200))
+            CHECK(now_ms() < end && ask("menu") > 0);
+        cover_ok(art_path("dir", "Series"), &k);
+    }
+    stop();
+    unlink(ECARD "/Videos/Series/folder.jpg"), unlink(ECARD "/Videos/Series/cover.jpg");
 
     /* Idleness, the ten minutes as 1.5 s through the host build's hook: the server ends itself
      * with status 0 (run's loop then ends), counted from the last request... */

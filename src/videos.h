@@ -56,7 +56,8 @@ int too_large(int w, int h, int bits, unsigned avail_kb);
 int pix_bits(int format);
 
 /* The video at path opened, for the thumbnails and the player alike: as one of FORMATS or not at
- * all, and nothing but files for whatever it names in turn, so a playlist or a script named .mp4
+ * all (a folder's picture, not named as a video, as the JPEG, PNG or WebP its first bytes say it
+ * is), and nothing but files for whatever it names in turn, so a playlist or a script named .mp4
  * is never followed; "file:" so that no name reads as a protocol's. libavformat asks stop(arg)
  * wherever it reads or waits and lets go when that says 1. 0 when it can't be opened, and
  * libavformat's error in *err when err is given. */
@@ -166,9 +167,14 @@ int lib_path(const char *root, const char *rel, char *out, size_t n);
  * come to the card first. Dot entries, and paths over REL_MAX, are left out and not counted. 0
  * when the folder can't be read; lib_free() l either way. */
 int lib_list(const char *root, const char *rel, int sort, listing_t *l);
-/* Every video under root, each named by its path from there, in natural order. 0 when root can't
- * be read (never an empty library: the caller mustn't take a pulled card for one). */
+/* Every video under root, each named by its path from there, in natural order, and the picture of
+ * each folder that holds one (lib_cover), as a video is. 0 when root can't be read (never an empty
+ * library: the caller mustn't take a pulled card for one). */
 int lib_all(const char *root, listing_t *l);
+/* The folder at rel's own picture, for its row's cover: the first of cover.jpg, folder.jpg,
+ * cover.png, folder.png, cover.webp and folder.webp in it, case aside, as Q2 Pod's folders have
+ * theirs. Its cache key (cache_key), or 0 when it has none. */
+unsigned long long lib_cover(const char *root, const char *rel);
 void lib_free(listing_t *l);
 /* A video's title into out: its file name less the extension. path may be relative. */
 const char *lib_title(const char *path, char *out, size_t n);
